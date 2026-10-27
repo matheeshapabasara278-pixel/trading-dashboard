@@ -1,9 +1,9 @@
 [build]
+  base = "client"
   command = "npm run build"
-  publish = "client/dist"
-  functions = "netlify/functions"
+  publish = "dist"
+  functions = "../netlify/functions"
 
-# Frontend එකෙන් /api/... කියලා ඉල්ලන ඉල්ලීම් Netlify function එකට redirect කිරීම සඳහා
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"

@@ -54,3 +54,4 @@ app.get(/^(?!\/api).*/, (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`🚀 MintPip Dashboard running on http://localhost:${PORT}`));
+module.exports = app;

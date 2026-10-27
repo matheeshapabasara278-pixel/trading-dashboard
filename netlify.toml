@@ -1,17 +1,10 @@
 [build]
-  command = "npm ci --prefix client && npm run build --prefix client"
+  command = "npm install --prefix client && npm run build --prefix client"
   publish = "client/dist"
   functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"
-
-[dev]
-  command = "npm run dev --prefix client"
-  targetPort = 5173
-  publish = "client/dist"
-  functions = "netlify/functions"
-  framework = "#static"
 
 [[redirects]]
   from = "/api/*"
@@ -20,5 +13,5 @@
 
 [[redirects]]
   from = "/*"
-  to = "/index.html"
+  to = /index.html
   status = 200

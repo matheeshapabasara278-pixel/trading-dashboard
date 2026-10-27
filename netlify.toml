@@ -1,7 +1,10 @@
 [build]
-  command = "npm run build --prefix client"
+  command = "npm ci --prefix client && npm run build --prefix client"
   publish = "client/dist"
   functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
 
 [dev]
   command = "npm run dev --prefix client"

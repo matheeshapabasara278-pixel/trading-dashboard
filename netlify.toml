@@ -1,10 +1,17 @@
 [build]
-  base = "client"
   command = "npm run build"
-  publish = "dist"
-  functions = "../netlify/functions"
+  publish = "client/dist"
+  functions = "netlify/functions"
+
+[dev]
+  command = "npm run dev --prefix client"
+  targetPort = 5173
+  publish = "client/dist"
+  functions = "netlify/functions"
+  framework = "#static"
 
 [[redirects]]
   from = "/api/*"
-  to = "/.netlify/functions/api/:splat"
+  to = "http://localhost:5000/api/:splat"
   status = 200
+  force = true

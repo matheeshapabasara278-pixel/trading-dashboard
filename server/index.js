@@ -1,22 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// PORT Variable Definition
 const PORT = process.env.PORT || 5000;
-
-// 1. Serve static files from 'public' folder
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Notion API Endpoint
 app.get('/api/notion', async (req, res) => {
   try {
     const databaseId = process.env.NOTION_DATABASE_ID;
-    const notionKey = process.env.NOTION_KEY;
+    const notionKey = process.env.NOTION_KEY || process.env.NOTION_API_KEY;
 
     const response = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
       method: 'POST',
@@ -26,7 +24,7 @@ app.get('/api/notion', async (req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        page_size: 100 // මෙන්න මෙතන page_size එක 100 දක්වා වැඩි කර දීමෙන් සියලුම ට්‍රේඩ්ස් එකවර ෆෙච් කරගත හැක
+        page_size: 100
       })
     });
 
@@ -43,15 +41,24 @@ app.get('/api/notion', async (req, res) => {
   }
 });
 
-// Netlify function fallback
+// Netlify function fallback redirect
 app.get('/.netlify/functions/notion', (req, res) => {
   res.redirect('/api/notion');
 });
 
-// 3. Serve index.html for all other routes (Express v5 compatible)
+// Serve static files from client build if exists
+app.use(express.static(path.join(__dirname, '../client/dist')));
+
+// Serve index.html for all other frontend routes
 app.get(/^(?!\/api).*/, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, '../client/dist', 'index.html'));
 });
 
-//app.listen(PORT, () => console.log(`🚀 MintPip Dashboard running on http://localhost:${PORT}`));
+// Local Development Server Listener
+if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
+  app.listen(PORT, () => {
+    console.log(`🚀 MintPip Server running locally on http://localhost:${PORT}`);
+  });
+}
+
 module.exports = app;

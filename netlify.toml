@@ -1,5 +1,5 @@
 [build]
-  command = "npm run build"
+  command = "npm run build --prefix client"
   publish = "client/dist"
   functions = "netlify/functions"
 
@@ -12,6 +12,10 @@
 
 [[redirects]]
   from = "/api/*"
-  to = "http://localhost:5000/api/:splat"
+  to = "/.netlify/functions/api/:splat"
   status = 200
-  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

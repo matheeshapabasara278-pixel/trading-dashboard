@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MintPip | Ultimate ICT Silver Bullet & Prop Dashboard</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        bgDark: '#07090E',
+                        cardDark: '#0D111A',
+                        cardHover: '#131926',
+                        borderDark: '#1E2638',
+                        emeraldAccent: '#10B981',
+                        roseAccent: '#EF4444',
+                        blueAccent: '#3874FF',
+                        purpleAccent: '#8B5CF6'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Inter Font -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #07090E;
+            color: #E5E7EB;
+            overflow-x: hidden;
+        }
+
+        .glass-card {
+            background: rgba(13, 17, 26, 0.75);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .glass-card:hover {
+            border-color: rgba(56, 116, 255, 0.3);
+            box-shadow: 0 12px 40px 0 rgba(56, 116, 255, 0.1);
+        }
+
+        .table-head-bg {
+            background: rgba(19, 25, 38, 0.8);
+        }
+
+        /* Light Theme Adaptation */
+        html:not(.dark) body {
+            background-color: #F8FAFC;
+            color: #1E293B;
+        }
+        html:not(.dark) .glass-card {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(226, 232, 240, 1);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05);
+        }
+        html:not(.dark) .table-head-bg {
+            background-color: #F1F5F9;
+        }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1E2638;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3874FF;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased">
+
+    <!-- Top Navigation Bar -->
+    <header class="glass-card sticky top-0 z-30 px-4 lg:px-8 py-3.5 border-b border-white/5 flex items-center justify-between">
+        <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blueAccent to-purpleAccent flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-blueAccent/30">
+                    <i class="fa-solid fa-bolt"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                        MintPip <span class="text-[10px] px-2 py-0.5 rounded-full bg-blueAccent/10 text-blueAccent border border-blueAccent/20 font-semibold">ICT Silver Bullet & Prop</span>
+                    </h1>
+                    <p class="text-xs text-gray-400">Advanced Analytics & Execution Hub</p>
+                </div>
+            </div>
+            <div class="hidden xl:flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-cardDark/85 border border-borderDark text-xs">
+                <i class="fa-regular fa-clock text-blueAccent animate-pulse"></i>
+                <span id="killzoneStatus" class="text-gray-300 font-medium">Checking Sri Lanka Killzone...</span>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-3">
+            <button onclick="openCalcModal()" class="hidden sm:flex px-3 py-2 rounded-xl bg-cardDark hover:bg-cardHover border border-borderDark text-gray-300 hover:text-white transition items-center gap-2 text-xs font-medium shadow-sm">
+                <i class="fa-solid fa-calculator text-purpleAccent"></i>
+                <span>Risk Calculator</span>
+            </button>
+
+            <button id="themeToggleBtn" onclick="toggleTheme()" class="w-9 h-9 rounded-xl bg-cardDark hover:bg-cardHover border border-borderDark text-gray-300 hover:text-white transition flex items-center justify-center text-sm shadow-sm" title="Toggle Theme">
+                <i class="fa-solid fa-sun text-amber-400" id="themeIcon"></i>
+            </button>
+
+            <div class="hidden sm:flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-cardDark/85 border border-borderDark text-xs">
+                <span class="relative flex h-2 w-2">
+                  <span id="syncPulse" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emeraldAccent opacity-75"></span>
+                  <span id="syncDot" class="relative inline-flex rounded-full h-2 w-2 bg-emeraldAccent"></span>
+                </span>
+                <span id="syncStatusText" class="text-gray-300 font-medium">Fetching Notion...</span>
+            </div>
+
+            <button onclick="fetchNotionData()" class="px-3.5 py-2 rounded-xl bg-blueAccent/10 hover:bg-blueAccent/20 border border-blueAccent/30 text-blueAccent transition flex items-center gap-2 text-xs font-semibold shadow-sm" title="Refresh Dashboard">
+                <i class="fa-solid fa-arrows-rotate" id="refreshIcon"></i>
+                <span class="hidden md:inline">Refresh Data</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 lg:p-8 space-y-6">
+
+        <!-- Top KPI Cards Grid -->
+        <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="glass-card rounded-2xl p-5 relative overflow-hidden group">
+                <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-emeraldAccent/10 rounded-full blur-2xl group-hover:scale-150 transition duration-500"></div>
+                <div class="flex items-center justify-between text-gray-400 mb-2">
+                    <span class="text-xs uppercase tracking-wider font-semibold">Total Net PnL</span>
+                    <i class="fa-solid fa-wallet text-emeraldAccent"></i>
+                </div>
+                <div class="flex items-baseline space-x-2">
+                    <span id="kpiNetProfit" class="text-2xl lg:text-3xl font-extrabold text-emeraldAccent">$0.00</span>
+                    <span id="kpiRMultiple" class="text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">0.0 R</span>
+                </div>
+                <div class="mt-3 text-xs text-gray-400 flex items-center gap-1">
+                    <i class="fa-solid fa-arrow-trend-up text-emeraldAccent"></i>
+                    <span>Live Notion Account PnL</span>
+                </div>
+            </div>
+
+            <div class="glass-card rounded-2xl p-5 relative overflow-hidden group">
+                <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-blueAccent/10 rounded-full blur-2xl group-hover:scale-150 transition duration-500"></div>
+                <div class="flex items-center justify-between text-gray-400 mb-2">
+                    <span class="text-xs uppercase tracking-wider font-semibold">Win Rate</span>
+                    <i class="fa-solid fa-chart-pie text-blueAccent"></i>
+                </div>
+                <div class="flex items-baseline justify-between">
+                    <span id="kpiWinRate" class="text-2xl lg:text-3xl font-extrabold text-white">0%</span>
+                    <span id="kpiWinLossRatio" class="text-xs text-gray-400">0W / 0L</span>
+                </div>
+                <div class="w-full bg-borderDark h-2 rounded-full mt-3 overflow-hidden">
+                    <div id="kpiWinProgressBar" class="bg-gradient-to-r from-blueAccent to-purpleAccent h-full rounded-full transition-all duration-700" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <div class="glass-card rounded-2xl p-5 relative overflow-hidden group">
+                <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-purpleAccent/10 rounded-full blur-2xl group-hover:scale-150 transition duration-500"></div>
+                <div class="flex items-center justify-between text-gray-400 mb-2">
+                    <span class="text-xs uppercase tracking-wider font-semibold">Profit Factor & R:R</span>
+                    <i class="fa-solid fa-scale-balanced text-purpleAccent"></i>
+                </div>
+                <div class="flex items-baseline justify-between">
+                    <div>
+                        <span id="kpiProfitFactor" class="text-2xl lg:text-3xl font-extrabold text-purple-400">0.00</span>
+                        <p class="text-xs text-gray-400">Profit Factor</p>
+                    </div>
+                    <div class="text-right">
+                        <span id="kpiAvgRR" class="text-xl font-bold text-white">1:2.0</span>
+                        <p class="text-xs text-gray-400">Target R:R</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Best Performing Month Widget -->
+            <div class="glass-card rounded-2xl p-5 relative overflow-hidden border-emerald-500/20 group">
+                <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-amber-500/10 rounded-full blur-2xl group-hover:scale-150 transition duration-500"></div>
+                <div class="flex items-center justify-between text-gray-400 mb-2">
+                    <span class="text-xs uppercase tracking-wider font-semibold text-emerald-400">Best Performance Month</span>
+                    <i class="fa-solid fa-trophy text-amber-400"></i>
+                </div>
+                <div class="flex items-baseline justify-between mt-1">
+                    <div>
+                        <span id="bestMonthName" class="text-xl lg:text-2xl font-extrabold text-white">N/A</span>
+                        <p id="bestMonthPnL" class="text-xs text-emerald-400 font-bold mt-0.5">$0.00</p>
+                    </div>
+                </div>
+                <div class="mt-2 text-[11px] text-gray-400">
+                    <span>Highest profitable trading month</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Charts Section -->
+        <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="glass-card rounded-2xl p-6 lg:col-span-2 flex flex-col justify-between">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-base font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-chart-line text-blueAccent"></i> Cumulative Equity Growth
+                        </h2>
+                        <p class="text-xs text-gray-400">Account balance progression over executions</p>
+                    </div>
+                </div>
+                <div class="relative h-72 w-full">
+                    <canvas id="equityChart"></canvas>
+                </div>
+            </div>
+
+            <div class="glass-card rounded-2xl p-6 flex flex-col justify-between">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-base font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-chart-pie text-purpleAccent"></i> Win / Loss Distribution
+                        </h2>
+                        <p class="text-xs text-gray-400">Trade outcome breakdown</p>
+                    </div>
+                </div>
+                <div class="relative h-52 w-full flex items-center justify-center">
+                    <canvas id="donutChart"></canvas>
+                </div>
+                <div class="grid grid-cols-2 gap-2 mt-4 text-center text-xs">
+                    <div class="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                        <span class="block text-emerald-400 font-extrabold text-sm" id="donutWins">0</span>
+                        <span class="text-gray-400">Wins</span>
+                    </div>
+                    <div class="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20">
+                        <span class="block text-rose-400 font-extrabold text-sm" id="donutLosses">0</span>
+                        <span class="text-gray-400">Losses</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Secondary Analytics Section -->
+        <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="glass-card rounded-2xl p-6 flex flex-col justify-between">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 class="text-base font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-chart-column text-emeraldAccent"></i> Performance by Session
+                        </h2>
+                        <p class="text-xs text-gray-400">London vs New York Silver Bullet Executions</p>
+                    </div>
+                </div>
+                <div class="relative h-60 w-full">
+                    <canvas id="sessionChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Dynamic Weekly / Monthly PnL Chart Card -->
+            <div class="glass-card rounded-2xl p-6 flex flex-col justify-between">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h2 id="timeframeChartTitle" class="text-base font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-calendar-days text-purpleAccent"></i> PnL by Day of the Week
+                        </h2>
+                        <p id="timeframeChartSubtitle" class="text-xs text-gray-400">Identify your most profitable trading days</p>
+                    </div>
+                    <!-- Toggle Switch for Weekly / Monthly -->
+                    <div class="flex items-center bg-cardDark border border-borderDark rounded-xl p-1 text-xs">
+                        <button id="btnWeekly" onclick="switchTimeframe('weekly')" class="px-3 py-1.5 rounded-lg bg-blueAccent text-white font-semibold transition shadow-sm">Weekly</button>
+                        <button id="btnMonthly" onclick="switchTimeframe('monthly')" class="px-3 py-1.5 rounded-lg text-gray-400 hover:text-white font-semibold transition">Monthly</button>
+                    </div>
+                </div>
+                <div class="relative h-60 w-full">
+                    <canvas id="timeframeChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Live Trade Journal Section -->
+        <section class="glass-card rounded-2xl p-6 overflow-hidden">
+            <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+                <div>
+                    <h2 class="text-base font-bold text-white flex items-center gap-2">
+                        <i class="fa-solid fa-list-check text-blueAccent"></i> Notion Trade Journal Executions
+                    </h2>
+                    <p class="text-xs text-gray-400">Live data fetched directly from Notion Database</p>
+                </div>
+
+                <!-- Custom Date Range & Filters Controls -->
+                <div class="flex flex-wrap items-center gap-2">
+                    <div class="flex items-center gap-1.5 bg-cardDark border border-borderDark px-3 py-1.5 rounded-xl text-xs">
+                        <span class="text-gray-400 text-[11px]">From:</span>
+                        <input type="date" id="startDateInput" onchange="filterTrades()" class="bg-transparent text-gray-200 focus:outline-none">
+                        <span class="text-gray-400 text-[11px]">To:</span>
+                        <input type="date" id="endDateInput" onchange="filterTrades()" class="bg-transparent text-gray-200 focus:outline-none">
+                    </div>
+
+                    <div class="relative">
+                        <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-xs text-gray-400"></i>
+                        <input type="text" id="searchInput" onkeyup="filterTrades()" placeholder="Search pair or setup score..." class="pl-9 pr-3 py-2 rounded-xl bg-cardDark border border-borderDark text-xs text-gray-200 focus:outline-none focus:border-blueAccent w-36 sm:w-44 transition">
+                    </div>
+
+                    <select id="sessionFilter" onchange="filterTrades()" class="py-2 px-3 rounded-xl bg-cardDark border border-borderDark text-xs text-gray-200 focus:outline-none focus:border-blueAccent transition">
+                        <option value="ALL">All Sessions</option>
+                        <option value="London">London Session</option>
+                        <option value="NY">NY Session</option>
+                    </select>
+
+                    <select id="resultFilter" onchange="filterTrades()" class="py-2 px-3 rounded-xl bg-cardDark border border-borderDark text-xs text-gray-200 focus:outline-none focus:border-blueAccent transition">
+                        <option value="ALL">All Results</option>
+                        <option value="Win">Wins Only</option>
+                        <option value="Loss">Losses Only</option>
+                    </select>
+
+                    <button onclick="exportToCSV()" class="py-2 px-3.5 rounded-xl bg-blueAccent/10 border border-blueAccent/20 text-blueAccent hover:bg-blueAccent/20 transition text-xs font-semibold flex items-center gap-1.5 shadow-sm" title="Export Filtered Trades to CSV">
+                        <i class="fa-solid fa-file-arrow-down"></i> Export
+                    </button>
+                </div>
+            </div>
+
+            <!-- Table Container with Spacious Padding -->
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse whitespace-nowrap">
+                    <thead>
+                        <tr class="border-b border-borderDark text-xs font-semibold text-gray-400 uppercase tracking-wider table-head-bg">
+                            <th class="py-4 px-5">Date & Day</th>
+                            <th class="py-4 px-5">Pair</th>
+                            <th class="py-4 px-5">Session</th>
+                            <th class="py-4 px-5 text-center">Setup Score</th>
+                            <th class="py-4 px-5">Direction</th>
+                            <th class="py-4 px-5">R:R</th>
+                            <th class="py-4 px-5 text-center">SL / TP (Pips)</th>
+                            <th class="py-4 px-5">PnL ($)</th>
+                            <th class="py-4 px-5 text-center">Result</th>
+                            <th class="py-4 px-5 text-center">Charts (Multiple)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradeTableBody" class="divide-y divide-borderDark/40 text-xs text-gray-300">
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination Bar (15 items per page) -->
+            <div id="paginationContainer" class="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6 pt-4 border-t border-borderDark text-xs text-gray-400">
+                <div id="paginationInfo">
+                    Showing <span id="showingStart" class="font-bold text-white">0</span> to <span id="showingEnd" class="font-bold text-white">0</span> of <span id="totalItems" class="font-bold text-white">0</span> trades
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button id="prevBtn" onclick="changePage(-1)" class="px-3.5 py-2 rounded-xl bg-cardDark hover:bg-cardHover border border-borderDark text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center gap-1.5 font-medium shadow-sm">
+                        <i class="fa-solid fa-chevron-left text-[10px]"></i> Prev
+                    </button>
+                    <span id="pageNumbers" class="px-3 font-semibold text-gray-300">Page 1 of 1</span>
+                    <button id="nextBtn" onclick="changePage(1)" class="px-3.5 py-2 rounded-xl bg-cardDark hover:bg-cardHover border border-borderDark text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center gap-1.5 font-medium shadow-sm">
+                        Next <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div id="noDataMessage" class="hidden text-center py-10 text-gray-400 text-xs">
+                No trades found in Notion database matching selection.
+            </div>
+        </section>
+
+    </main>
+
+    <!-- High-Resolution Chart Preview Pop-up Modal -->
+    <div id="chartModal" class="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center hidden p-3 sm:p-4">
+        <div class="glass-card rounded-2xl p-5 max-w-6xl w-full border border-white/10 relative shadow-2xl flex flex-col space-y-3 max-h-[95vh]">
+            <div class="flex items-center justify-between pb-3 border-b border-borderDark">
+                <h3 id="chartModalTitle" class="text-sm font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-image text-blueAccent"></i> Trade Execution Chart
+                </h3>
+                <button onclick="closeChartModal()" class="text-gray-400 hover:text-white p-1.5 rounded-lg hover:bg-cardHover transition text-base"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="flex-1 overflow-auto flex items-center justify-center bg-black/50 rounded-xl p-3 min-h-[420px]">
+                <img id="chartModalImg" src="" alt="Trade Chart Preview" class="max-h-[82vh] w-full object-contain rounded-lg shadow-2xl hidden">
+                <span id="chartModalNoImg" class="text-xs text-gray-400 hidden">No screenshot image available for this trade.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Risk Calculator Modal -->
+    <div id="calcModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+        <div class="glass-card rounded-2xl p-6 max-w-md w-full border border-white/10 relative shadow-2xl">
+            <div class="flex items-center justify-between mb-5">
+                <h3 class="text-base font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-calculator text-purpleAccent"></i> Lot Size Risk Calculator
+                </h3>
+                <button onclick="closeCalcModal()" class="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-cardHover"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <div class="space-y-4 text-xs">
+                <div>
+                    <label class="block text-gray-400 mb-1.5 font-medium">Account Balance ($)</label>
+                    <input type="number" id="calcBalance" value="10000" class="w-full p-3 rounded-xl bg-cardDark border border-borderDark text-gray-200 focus:outline-none focus:border-blueAccent transition">
+                </div>
+                <div>
+                    <label class="block text-gray-400 mb-1.5 font-medium">Risk Percentage (%)</label>
+                    <input type="number" id="calcRiskPct" value="1" step="0.1" class="w-full p-3 rounded-xl bg-cardDark border border-borderDark text-gray-200 focus:outline-none focus:border-blueAccent transition">
+                </div>
+                <div>
+                    <label class="block text-gray-400 mb-1.5 font-medium">Stop Loss (Pips)</label>
+                    <input type="number" id="calcSLPips" value="15" class="w-full p-3 rounded-xl bg-cardDark border border-borderDark text-gray-200 focus:outline-none focus:border-blueAccent transition">
+                </div>
+                <div class="p-3.5 rounded-xl bg-cardDark/80 border border-borderDark space-y-1.5">
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">Risk Amount ($):</span>
+                        <span id="resRiskAmount" class="font-bold text-white">$100.00</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">Recommended Lot Size:</span>
+                        <span id="resLotSize" class="font-bold text-emeraldAccent">0.07 Standard Lots</span>
+                    </div>
+                </div>
+                <button onclick="calculateLotSize()" class="w-full py-3 rounded-xl bg-blueAccent hover:bg-blue-600 text-white font-bold transition shadow-lg shadow-blueAccent/25">Calculate</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="mt-auto border-t border-white/5 py-4 text-center text-xs text-gray-500">
+        <p>ICT Silver Bullet & Prop Dashboard &bull; MintPip Engine &bull; Netlify & Notion API Live Sync</p>
+    </footer>
+
+    <!-- Application Logic -->
+    <script>
+        let trades = [];
+        let filteredTradesList = [];
+        let currentPage = 1;
+        const rowsPerPage = 15;
+        let currentTimeframeMode = 'weekly';
+
+        let equityChartInstance = null;
+        let donutChartInstance = null;
+        let sessionChartInstance = null;
+        let timeframeChartInstance = null;
+
+        function playSound(freq = 600, type = 'sine', duration = 0.1) {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, ctx.currentTime);
+                gain.gain.setValueAtTime(0.03, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + duration);
+            } catch(e) {}
+        }
+
+        function toggleTheme() {
+            playSound(800, 'sine', 0.08);
+            const html = document.documentElement;
+            const icon = document.getElementById('themeIcon');
+            
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                icon.className = "fa-solid fa-moon text-indigo-600";
+                localStorage.setItem('theme', 'light');
+            } else {
+                html.classList.add('dark');
+                icon.className = "fa-solid fa-sun text-amber-400";
+                localStorage.setItem('theme', 'dark');
+            }
+            renderCharts();
+        }
+
+        (function initTheme() {
+            const savedTheme = localStorage.getItem('theme');
+            const icon = document.getElementById('themeIcon');
+            if (savedTheme === 'light') {
+                document.documentElement.classList.remove('dark');
+                if (icon) icon.className = "fa-solid fa-moon text-indigo-600";
+            }
+        })();
+
+        function openCalcModal() { document.getElementById('calcModal').classList.remove('hidden'); calculateLotSize(); playSound(500, 'sine', 0.1); }
+        function closeCalcModal() { document.getElementById('calcModal').classList.add('hidden'); }
+        function calculateLotSize() {
+            const bal = parseFloat(document.getElementById('calcBalance').value) || 0;
+            const riskPct = parseFloat(document.getElementById('calcRiskPct').value) || 0;
+            const slPips = parseFloat(document.getElementById('calcSLPips').value) || 1;
+            
+            const riskAmt = bal * (riskPct / 100);
+            const lotSize = riskAmt / (slPips * 10);
+
+            document.getElementById('resRiskAmount').innerText = `$${riskAmt.toFixed(2)}`;
+            document.getElementById('resLotSize').innerText = `${lotSize.toFixed(2)} Standard Lots`;
+        }
+
+        function openChartModal(url, title) {
+            playSound(700, 'triangle', 0.12);
+            const modal = document.getElementById('chartModal');
+            const img = document.getElementById('chartModalImg');
+            const noImg = document.getElementById('chartModalNoImg');
+            document.getElementById('chartModalTitle').innerText = `Trade Chart: ${title}`;
+
+            if (url && url !== 'N/A') {
+                img.src = url;
+                img.classList.remove('hidden');
+                noImg.classList.add('hidden');
+            } else {
+                img.src = '';
+                img.classList.add('hidden');
+                noImg.classList.remove('hidden');
+            }
+            modal.classList.remove('hidden');
+        }
+        function closeChartModal() { document.getElementById('chartModal').classList.add('hidden'); }
+
+        // Sri Lanka Killzone Timer: London (12:30 - 13:30) & New York (19:30 - 20:30)
+        setInterval(() => {
+            const now = new Date();
+            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const lkTime = new Date(utcTime + (3600000 * 5.5));
+            
+            const hours = lkTime.getHours();
+            const mins = lkTime.getMinutes();
+            const timeNum = hours + mins / 60;
+            
+            let status = "Market Open (Outside Killzone)";
+            let color = "text-gray-400";
+
+            if (timeNum >= 12.5 && timeNum < 13.5) {
+                status = "🔥 London Silver Bullet Active (12:30 - 13:30)";
+                color = "text-emeraldAccent font-bold";
+            } 
+            else if (timeNum >= 19.5 && timeNum < 20.5) {
+                status = "🔥 New York Silver Bullet Active (19:30 - 20:30)";
+                color = "text-emeraldAccent font-bold";
+            }
+
+            const el = document.getElementById('killzoneStatus');
+            if(el) {
+                el.className = color;
+                el.innerText = status;
+            }
+        }, 1000);
+
+        async function fetchNotionData() {
+            playSound(900, 'sine', 0.15);
+            const icon = document.getElementById('refreshIcon');
+            icon.classList.add('fa-spin');
+            
+            document.getElementById('syncStatusText').innerText = "Syncing Notion...";
+            document.getElementById('syncDot').className = "relative inline-flex rounded-full h-2 w-2 bg-yellow-400";
+            document.getElementById('syncPulse').className = "animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75";
+
+            const endpoints = ['/.netlify/functions/notion', '/api/notion'];
+            let fetchedData = null;
+
+            for (let url of endpoints) {
+                try {
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        fetchedData = await response.json();
+                        break;
+                    }
+                } catch (e) {
+                    console.log("Attempted " + url + " - moving to fallback...");
+                }
+            }
+
+            if (fetchedData && fetchedData.results) {
+                document.getElementById('syncStatusText').innerText = "Live Notion Connected";
+                document.getElementById('syncDot').className = "relative inline-flex rounded-full h-2 w-2 bg-emeraldAccent";
+                document.getElementById('syncPulse').className = "animate-ping absolute inline-flex h-full w-full rounded-full bg-emeraldAccent opacity-75";
+                
+                parseNotionData(fetchedData.results);
+            } else {
+                document.getElementById('syncStatusText').innerText = "Notion Sync Error";
+                document.getElementById('syncDot').className = "relative inline-flex rounded-full h-2 w-2 bg-roseAccent";
+                document.getElementById('syncPulse').className = "hidden";
+                console.error("Could not fetch data from Notion API.");
+            }
+
+            setTimeout(() => icon.classList.remove('fa-spin'), 600);
+        }
+
+        // Parse Notion Properties
+        function parseNotionData(results) {
+            trades = results.map((item, index) => {
+                const props = item.properties;
+
+                const dateStr = props['DATE']?.date?.start || props['Date']?.date?.start || 'N/A';
+                
+                let dayOfWeek = 'N/A';
+                let monthYearKey = 'N/A';
+                if (dateStr !== 'N/A') {
+                    const d = new Date(dateStr);
+                    if (!isNaN(d)) {
+                        dayOfWeek = d.toLocaleDateString('en-US', { weekday: 'short' });
+                        monthYearKey = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+                    }
+                }
+
+                const pairDirectionTag = props['PAIR & DIRECTION']?.select?.name || props['PAIR / ASSET']?.select?.name || props['Pair']?.select?.name || 'GBP/USD - BUY';
+                const pair = pairDirectionTag.includes('-') ? pairDirectionTag.split('-')[0].trim() : pairDirectionTag;
+
+                let direction = 'LONG';
+                const tagUpper = pairDirectionTag.toUpperCase();
+                if (tagUpper.includes('SELL') || tagUpper.includes('SHORT')) {
+                    direction = 'SHORT';
+                } else if (tagUpper.includes('BUY') || tagUpper.includes('LONG')) {
+                    direction = 'LONG';
+                }
+
+                const rawSession = props['SESSION & TIME']?.select?.name || props['Session']?.select?.name || 'N/A';
+                const rr = props['PLANNED R:R']?.number || props['RR']?.number || 2.0;
+                
+                const setupScoreProp = props['SETUP SCORE'] || props['Setup Score'] || props['EXECUTION RULES'];
+                let setupScoreVal = 'N/A';
+                if (setupScoreProp) {
+                    if (setupScoreProp.formula) {
+                        setupScoreVal = setupScoreProp.formula.string || setupScoreProp.formula.number || 'N/A';
+                    } else if (setupScoreProp.select) {
+                        setupScoreVal = setupScoreProp.select.name;
+                    } else if (setupScoreProp.rich_text) {
+                        setupScoreVal = setupScoreProp.rich_text.map(t => t.plain_text).join('') || 'N/A';
+                    } else if (setupScoreProp.string) {
+                        setupScoreVal = setupScoreProp.string;
+                    }
+                }
+
+                const targetProp = props['PLANE TARGET (RR & PIPS)'] || props['SL / TP Pips'] || props['Target'];
+                let slPipsVal = '0';
+                let tpPipsVal = '0';
+                
+                if (targetProp) {
+                    let targetText = '';
+                    if (targetProp.formula) {
+                        targetText = targetProp.formula.string || '';
+                    } else if (targetProp.rich_text && targetProp.rich_text.length > 0) {
+                        targetText = targetProp.rich_text.map(t => t.plain_text).join('');
+                    } else if (targetProp.string) {
+                        targetText = targetProp.string;
+                    }
+
+                    if (targetText) {
+                        const match = targetText.match(/\(([^)]+)\)/);
+                        if (match && match[1]) {
+                            const pipsParts = match[1].split(':');
+                            if (pipsParts.length === 2) {
+                                slPipsVal = pipsParts[0].trim();
+                                tpPipsVal = pipsParts[1].trim();
+                            }
+                        }
+                    }
+                }
+
+                const profitAmt = props['PROFITE AMOUNT']?.number || props['Profit Amount']?.number || 0;
+                const lossAmt = props['LOSS AMOUNT']?.number || props['Loss Amount']?.number || 0;
+                const genericPnL = props['PROFIT/LOSS AMOUNT']?.number || props['PnL']?.number || 0;
+                
+                let pnl = genericPnL;
+                if (profitAmt > 0) pnl = profitAmt;
+                else if (lossAmt > 0) pnl = -Math.abs(lossAmt);
+
+                const outcome = props['OUTCOME']?.select?.name || props['Outcome']?.select?.name || (pnl >= 0 ? 'Win' : 'Loss');
+                
+                let beforeUrls = [];
+                const beforeFiles = props['BEFORE CHART']?.files || props['Before Chart']?.files;
+                if (beforeFiles && beforeFiles.length > 0) {
+                    beforeUrls = beforeFiles.map(f => f?.file?.url || f?.external?.url).filter(Boolean);
+                }
+
+                let afterUrls = [];
+                const afterFiles = props['AFTER CHART']?.files || props['After Chart']?.files;
+                if (afterFiles && afterFiles.length > 0) {
+                    afterUrls = afterFiles.map(f => f?.file?.url || f?.external?.url).filter(Boolean);
+                }
+
+                let normalizedSession = rawSession;
+                const upperS = rawSession.toUpperCase();
+                if (upperS.includes('LN') || upperS.includes('LONDON')) {
+                    normalizedSession = 'London Session';
+                } else if (upperS.includes('NY') || upperS.includes('NEW YORK')) {
+                    normalizedSession = 'New York Session';
+                }
+
+                return {
+                    id: index + 1,
+                    date: dateStr,
+                    day: dayOfWeek,
+                    monthYear: monthYearKey,
+                    pair: pair,
+                    session: normalizedSession,
+                    setupScore: setupScoreVal,
+                    direction: direction,
+                    rr: `1:${rr}`,
+                    slPips: slPipsVal,
+                    tpPips: tpPipsVal,
+                    pnl: pnl,
+                    beforeCharts: beforeUrls,
+                    afterCharts: afterUrls,
+                    result: outcome.toLowerCase().includes('win') ? 'Win' : 'Loss'
+                };
+            });
+
+            filteredTradesList = [...trades];
+            calculateKPIs();
+            renderCharts();
+            currentPage = 1;
+            renderPaginatedTable();
+        }
+
+        function calculateKPIs() {
+            let totalPnL = 0;
+            let wins = 0;
+            let losses = 0;
+            let totalWinAmount = 0;
+            let totalLossAmount = 0;
+
+            let peak = 0;
+            let maxDD = 0;
+            let runningBalance = 0;
+
+            let monthlyPnLMap = {};
+
+            trades.forEach(t => {
+                totalPnL += t.pnl;
+                runningBalance += t.pnl;
+                if (runningBalance > peak) peak = runningBalance;
+                const dd = peak - runningBalance;
+                if (dd > maxDD) maxDD = dd;
+
+                if (t.result === 'Win') {
+                    wins++;
+                    totalWinAmount += t.pnl;
+                } else if (t.result === 'Loss') {
+                    losses++;
+                    totalLossAmount += Math.abs(t.pnl);
+                }
+
+                if (t.monthYear && t.monthYear !== 'N/A') {
+                    monthlyPnLMap[t.monthYear] = (monthlyPnLMap[t.monthYear] || 0) + t.pnl;
+                }
+            });
+
+            let bestMonth = 'N/A';
+            let highestMonthPnL = -Infinity;
+            for (let m in monthlyPnLMap) {
+                if (monthlyPnLMap[m] > highestMonthPnL) {
+                    highestMonthPnL = monthlyPnLMap[m];
+                    bestMonth = m;
+                }
+            }
+
+            const bestMonthEl = document.getElementById('bestMonthName');
+            const bestMonthPnLEl = document.getElementById('bestMonthPnL');
+            if (bestMonthEl && bestMonthPnLEl) {
+                if (bestMonth !== 'N/A') {
+                    bestMonthEl.innerText = bestMonth;
+                    bestMonthPnLEl.innerText = `${highestMonthPnL >= 0 ? '+' : ''}$${highestMonthPnL.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+                } else {
+                    bestMonthEl.innerText = 'No Data';
+                    bestMonthPnLEl.innerText = '$0.00';
+                }
+            }
+
+            const totalTrades = trades.length;
+            const winRate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : 0;
+            const profitFactor = totalLossAmount > 0 ? (totalWinAmount / totalLossAmount).toFixed(2) : totalWinAmount.toFixed(2);
+            const rMultiple = (totalPnL / 150).toFixed(1);
+
+            const netProfitEl = document.getElementById('kpiNetProfit');
+            if (netProfitEl) netProfitEl.innerText = `${totalPnL >= 0 ? '+' : ''}$${totalPnL.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+
+            const rMultEl = document.getElementById('kpiRMultiple');
+            if (rMultEl) rMultEl.innerText = `${rMultiple >= 0 ? '+' : ''}${rMultiple} R`;
+
+            const winRateEl = document.getElementById('kpiWinRate');
+            if (winRateEl) winRateEl.innerText = `${winRate}%`;
+
+            const winLossRatioEl = document.getElementById('kpiWinLossRatio');
+            if (winLossRatioEl) winLossRatioEl.innerText = `${wins}W / ${losses}L`;
+
+            const winProgBar = document.getElementById('kpiWinProgressBar');
+            if (winProgBar) winProgBar.style.width = `${winRate}%`;
+
+            const profitFactorEl = document.getElementById('kpiProfitFactor');
+            if (profitFactorEl) profitFactorEl.innerText = profitFactor;
+
+            const donutWinsEl = document.getElementById('donutWins');
+            if (donutWinsEl) donutWinsEl.innerText = wins;
+
+            const donutLossesEl = document.getElementById('donutLosses');
+            if (donutLossesEl) donutLossesEl.innerText = losses;
+        }
+
+        function switchTimeframe(mode) {
+            playSound(600, 'sine', 0.08);
+            currentTimeframeMode = mode;
+            const btnWeekly = document.getElementById('btnWeekly');
+            const btnMonthly = document.getElementById('btnMonthly');
+            const titleEl = document.getElementById('timeframeChartTitle');
+            const subtitleEl = document.getElementById('timeframeChartSubtitle');
+
+            if (mode === 'weekly') {
+                if (btnWeekly) btnWeekly.className = "px-3 py-1.5 rounded-lg bg-blueAccent text-white font-semibold transition shadow-sm";
+                if (btnMonthly) btnMonthly.className = "px-3 py-1.5 rounded-lg text-gray-400 hover:text-white font-semibold transition";
+                if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-calendar-days text-purpleAccent"></i> PnL by Day of the Week`;
+                if (subtitleEl) subtitleEl.innerText = "Identify your most profitable trading days";
+            } else {
+                if (btnMonthly) btnMonthly.className = "px-3 py-1.5 rounded-lg bg-blueAccent text-white font-semibold transition shadow-sm";
+                if (btnWeekly) btnWeekly.className = "px-3 py-1.5 rounded-lg text-gray-400 hover:text-white font-semibold transition";
+                if (titleEl) titleEl.innerHTML = `<i class="fa-solid fa-calendar-check text-purpleAccent"></i> PnL by Month`;
+                if (subtitleEl) subtitleEl.innerText = "Identify your most profitable trading months";
+            }
+            renderTimeframeChart();
+        }
+
+        function renderCharts() {
+            const isDark = document.documentElement.classList.contains('dark');
+            const gridColor = isDark ? '#1E2638' : '#E2E8F0';
+            const textColor = isDark ? '#94A3B8' : '#64748B';
+
+            let cumulativePnL = 0;
+            const equityLabels = ['Start'];
+            const equityData = [0];
+
+            trades.forEach((t, i) => {
+                cumulativePnL += t.pnl;
+                equityLabels.push(`T#${i+1}`);
+                equityData.push(cumulativePnL);
+            });
+
+            if (equityChartInstance) equityChartInstance.destroy();
+            const equityCanvas = document.getElementById('equityChart');
+            if (equityCanvas) {
+                const ctxEquity = equityCanvas.getContext('2d');
+                const gradient = ctxEquity.createLinearGradient(0, 0, 0, 300);
+                gradient.addColorStop(0, 'rgba(56, 116, 255, 0.35)');
+                gradient.addColorStop(1, 'rgba(56, 116, 255, 0.0)');
+
+                equityChartInstance = new Chart(ctxEquity, {
+                    type: 'line',
+                    data: {
+                        labels: equityLabels,
+                        datasets: [{
+                            label: 'Cumulative PnL ($)',
+                            data: equityData,
+                            borderColor: '#3874FF',
+                            borderWidth: 3,
+                            fill: true,
+                            backgroundColor: gradient,
+                            tension: 0.4,
+                            pointBackgroundColor: '#3874FF',
+                            pointRadius: 3,
+                            pointHoverRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { grid: { color: gridColor }, ticks: { color: textColor } },
+                            y: { grid: { color: gridColor }, ticks: { color: textColor } }
+                        }
+                    }
+                });
+            }
+
+            if (donutChartInstance) donutChartInstance.destroy();
+            const donutCanvas = document.getElementById('donutChart');
+            if (donutCanvas) {
+                const ctxDonut = donutCanvas.getContext('2d');
+                const wins = trades.filter(t => t.result === 'Win').length;
+                const losses = trades.filter(t => t.result === 'Loss').length;
+
+                donutChartInstance = new Chart(ctxDonut, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Wins', 'Losses'],
+                        datasets: [{
+                            data: [wins, losses],
+                            backgroundColor: ['#10B981', '#EF4444'],
+                            borderWidth: 0,
+                            hoverOffset: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        cutout: '75%'
+                    }
+                });
+            }
+
+            if (sessionChartInstance) sessionChartInstance.destroy();
+            const sessionCanvas = document.getElementById('sessionChart');
+            if (sessionCanvas) {
+                const ctxSession = sessionCanvas.getContext('2d');
+                const londonWins = trades.filter(t => t.session.includes('London') && t.result === 'Win').length;
+                const londonLosses = trades.filter(t => t.session.includes('London') && t.result === 'Loss').length;
+                const nyWins = trades.filter(t => t.session.includes('New York') && t.result === 'Win').length;
+                const nyLosses = trades.filter(t => t.session.includes('New York') && t.result === 'Loss').length;
+
+                sessionChartInstance = new Chart(ctxSession, {
+                    type: 'bar',
+                    data: {
+                        labels: ['London Session', 'New York Session'],
+                        datasets: [
+                            { label: 'Wins', data: [londonWins, nyWins], backgroundColor: '#10B981', borderRadius: 8 },
+                            { label: 'Losses', data: [londonLosses, nyLosses], backgroundColor: '#EF4444', borderRadius: 8 }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: textColor } } },
+                        scales: {
+                            x: { grid: { display: false }, ticks: { color: textColor } },
+                            y: { grid: { color: gridColor }, ticks: { color: textColor } }
+                        }
+                    }
+                });
+            }
+
+            renderTimeframeChart();
+        }
+
+        function renderTimeframeChart() {
+            const isDark = document.documentElement.classList.contains('dark');
+            const gridColor = isDark ? '#1E2638' : '#E2E8F0';
+            const textColor = isDark ? '#94A3B8' : '#64748B';
+
+            if (timeframeChartInstance) timeframeChartInstance.destroy();
+            const tfCanvas = document.getElementById('timeframeChart');
+            if (!tfCanvas) return;
+            const ctxTf = tfCanvas.getContext('2d');
+
+            let labels = [];
+            let dataValues = [];
+
+            if (currentTimeframeMode === 'weekly') {
+                labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+                dataValues = labels.map(day => {
+                    return trades.filter(t => t.day === day).reduce((acc, curr) => acc + curr.pnl, 0);
+                });
+            } else {
+                let monthMap = {};
+                trades.forEach(t => {
+                    if (t.monthYear && t.monthYear !== 'N/A') {
+                        monthMap[t.monthYear] = (monthMap[t.monthYear] || 0) + t.pnl;
+                    }
+                });
+                labels = Object.keys(monthMap);
+                dataValues = Object.values(monthMap);
+                if (labels.length === 0) {
+                    labels = ['No Data'];
+                    dataValues = [0];
+                }
+            }
+
+            timeframeChartInstance = new Chart(ctxTf, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Net PnL ($)',
+                        data: dataValues,
+                        backgroundColor: dataValues.map(val => val >= 0 ? '#10B981' : '#EF4444'),
+                        borderRadius: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: textColor } },
+                        y: { grid: { color: gridColor }, ticks: { color: textColor } }
+                    }
+                }
+            });
+        }
+
+        function renderPaginatedTable() {
+            const tableBody = document.getElementById('tradeTableBody');
+            const noData = document.getElementById('noDataMessage');
+            const paginationContainer = document.getElementById('paginationContainer');
+            
+            if (!tableBody) return;
+            tableBody.innerHTML = '';
+
+            const totalItems = filteredTradesList.length;
+
+            if (totalItems === 0) {
+                if (noData) noData.classList.remove('hidden');
+                if (paginationContainer) paginationContainer.classList.add('hidden');
+                return;
+            } else {
+                if (noData) noData.classList.add('hidden');
+                if (paginationContainer) paginationContainer.classList.remove('hidden');
+            }
+
+            const totalPages = Math.ceil(totalItems / rowsPerPage);
+            if (currentPage > totalPages) currentPage = totalPages;
+            if (currentPage < 1) currentPage = 1;
+
+            const startIndex = (currentPage - 1) * rowsPerPage;
+            const endIndex = Math.min(startIndex + rowsPerPage, totalItems);
+
+            const pageItems = filteredTradesList.slice(startIndex, endIndex);
+
+            pageItems.forEach(trade => {
+                const row = document.createElement('tr');
+                const isWin = trade.result === 'Win';
+                const pnlClass = isWin ? 'text-emeraldAccent font-semibold' : 'text-roseAccent font-semibold';
+                const tagClass = isWin ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border-rose-500/20';
+
+                let chartBtnsHTML = '<div class="flex items-center justify-center gap-1.5 flex-wrap">';
+                
+                if (trade.beforeCharts && trade.beforeCharts.length > 0) {
+                    trade.beforeCharts.forEach((url, idx) => {
+                        chartBtnsHTML += `<button onclick="openChartModal('${url}', 'Before Chart #${idx + 1} - ${trade.date} ${trade.pair}')" class="px-2.5 py-1 rounded-lg bg-blueAccent/10 text-blueAccent border border-blueAccent/20 hover:bg-blueAccent/20 transition text-[10px] font-semibold"><i class="fa-regular fa-image"></i> Before #${idx + 1}</button>`;
+                    });
+                }
+                
+                if (trade.afterCharts && trade.afterCharts.length > 0) {
+                    trade.afterCharts.forEach((url, idx) => {
+                        chartBtnsHTML += `<button onclick="openChartModal('${url}', 'After Chart #${idx + 1} - ${trade.date} ${trade.pair}')" class="px-2.5 py-1 rounded-lg bg-purpleAccent/10 text-purpleAccent border border-purpleAccent/20 hover:bg-purpleAccent/20 transition text-[10px] font-semibold"><i class="fa-regular fa-image"></i> After #${idx + 1}</button>`;
+                    });
+                }
+
+                if ((!trade.beforeCharts || trade.beforeCharts.length === 0) && (!trade.afterCharts || trade.afterCharts.length === 0)) {
+                    chartBtnsHTML += `<span class="text-gray-500 text-[11px]">N/A</span>`;
+                }
+                chartBtnsHTML += '</div>';
+
+                row.innerHTML = `
+                    <td class="py-4 px-5 font-medium">${trade.date} <span class="text-[10px] text-gray-400">(${trade.day})</span></td>
+                    <td class="py-4 px-5 font-bold text-white">${trade.pair}</td>
+                    <td class="py-4 px-5"><span class="px-3 py-1 rounded-lg bg-cardDark border border-borderDark text-[11px] whitespace-nowrap shadow-sm">${trade.session}</span></td>
+                    <td class="py-4 px-5 text-center font-bold text-amber-400 text-[11px]">${trade.setupScore}</td>
+                    <td class="py-4 px-5 font-semibold ${trade.direction === 'LONG' ? 'text-blueAccent' : 'text-purpleAccent'}">${trade.direction}</td>
+                    <td class="py-4 px-5 text-gray-400">${trade.rr}</td>
+                    <td class="py-4 px-5 text-center whitespace-nowrap">
+                        <span class="text-rose-400 font-medium">${trade.slPips} pips</span> / <span class="text-emerald-400 font-medium">${trade.tpPips} pips</span>
+                    </td>
+                    <td class="py-4 px-5 ${pnlClass} whitespace-nowrap">${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}</td>
+                    <td class="py-4 px-5 text-center">
+                        <span class="px-3 py-1 rounded-full border text-[10px] font-bold ${tagClass}">${trade.result}</span>
+                    </td>
+                    <td class="py-4 px-5 text-center">${chartBtnsHTML}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            const startEl = document.getElementById('showingStart');
+            const endEl = document.getElementById('showingEnd');
+            const totalEl = document.getElementById('totalItems');
+            const pageNumEl = document.getElementById('pageNumbers');
+
+            if (startEl) startEl.innerText = startIndex + 1;
+            if (endEl) endEl.innerText = endIndex;
+            if (totalEl) totalEl.innerText = totalItems;
+            if (pageNumEl) pageNumEl.innerText = `Page ${currentPage} of ${totalPages}`;
+
+            const prevBtn = document.getElementById('prevBtn');
+            const nextBtn = document.getElementById('nextBtn');
+            if (prevBtn) prevBtn.disabled = currentPage === 1;
+            if (nextBtn) nextBtn.disabled = currentPage === totalPages;
+        }
+
+        function changePage(direction) {
+            playSound(500, 'sine', 0.05);
+            currentPage += direction;
+            renderPaginatedTable();
+        }
+
+        function filterTrades() {
+            const searchVal = document.getElementById('searchInput').value.toLowerCase();
+            const sessionVal = document.getElementById('sessionFilter').value;
+            const resultVal = document.getElementById('resultFilter').value;
+            const startDate = document.getElementById('startDateInput').value;
+            const endDate = document.getElementById('endDateInput').value;
+
+            filteredTradesList = trades.filter(t => {
+                const matchesSearch = t.pair.toLowerCase().includes(searchVal) || String(t.setupScore).toLowerCase().includes(searchVal);
+                
+                let matchesSession = true;
+                if (sessionVal !== 'ALL') {
+                    if (sessionVal === 'London') {
+                        matchesSession = t.session.includes('London');
+                    } else if (sessionVal === 'NY') {
+                        matchesSession = t.session.includes('New York');
+                    }
+                }
+
+                const matchesResult = resultVal === 'ALL' || t.result === resultVal;
+
+                let matchesDate = true;
+                if (t.date !== 'N/A') {
+                    if (startDate && t.date < startDate) matchesDate = false;
+                    if (endDate && t.date > endDate) matchesDate = false;
+                }
+
+                return matchesSearch && matchesSession && matchesResult && matchesDate;
+            });
+
+            currentPage = 1;
+            renderPaginatedTable();
+        }
+
+        function exportToCSV() {
+            playSound(1000, 'sine', 0.1);
+            let csvContent = "data:text/csv;charset=utf-8,Date,Day,Pair,Session,SetupScore,Direction,RR,SL(pips),TP(pips),PnL,Result\n";
+            filteredTradesList.forEach(t => {
+                csvContent += `"${t.date}","${t.day}","${t.pair}","${t.session}","${t.setupScore}","${t.direction}","${t.rr}","${t.slPips}","${t.tpPips}","${t.pnl}","${t.result}"\n`;
+            });
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "MintPip_Trade_Journal.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        window.onload = function() {
+            fetchNotionData();
+        };
+    </script>
+</body>
+</html>

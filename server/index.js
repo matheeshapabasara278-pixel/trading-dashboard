@@ -10,11 +10,24 @@ app.use(express.json());
 // PORT Variable Definition
 const PORT = process.env.PORT || 5000;
 
-// Notion API Endpoint
+// Notion API Endpoint (Supports both Backtest and Live databases via query parameter ?type=backtest or ?type=live)
 app.get('/api/notion', async (req, res) => {
   try {
-    const databaseId = process.env.NOTION_DATABASE_ID;
+    const { type } = req.query; // Frontend එකෙන් එවන type එක ('backtest' හෝ 'live')
+
+    // Dynamic Database ID Selection
+    const databaseId = type === 'backtest'
+      ? process.env.NOTION_BACKTEST_DATABASE_ID
+      : process.env.NOTION_LIVE_DATABASE_ID;
+
     const notionKey = process.env.NOTION_KEY || process.env.NOTION_API_KEY;
+
+    if (!databaseId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Database ID for type '${type || 'live'}' is not configured in environment variables.` 
+      });
+    }
 
     const response = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
       method: 'POST',

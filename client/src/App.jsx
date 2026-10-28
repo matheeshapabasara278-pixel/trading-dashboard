@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Chart from 'chart.js/auto';
 
 export default function App() {
+    const [activeDatabase, setActiveDatabase] = useState('live'); // 'live' හෝ 'backtest'
     const [trades, setTrades] = useState([]);
     const [filteredTradesList, setFilteredTradesList] = useState([]);
     const [currentPage, setCurrentPage] = useState(1);
@@ -12,7 +13,7 @@ export default function App() {
     const [killzoneStatus, setKillzoneStatus] = useState("Checking Sri Lanka Killzone...");
     const [killzoneColor, setKillzoneColor] = useState("text-gray-400");
     const [syncStatus, setSyncStatus] = useState({ text: "Fetching Notion...", dot: "bg-emerald-400", pulse: true });
-    
+
     // Modal States
     const [isCalcOpen, setIsCalcOpen] = useState(false);
     const [isChartOpen, setIsChartOpen] = useState(false);
@@ -80,7 +81,7 @@ export default function App() {
                 osc.start();
                 osc.stop(ctx.currentTime + 0.3);
             }
-        } catch (e) {}
+        } catch (e) { }
     };
 
     // Keyboard Arrow Navigation for Modal Images
@@ -113,7 +114,7 @@ export default function App() {
             const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
             const lkTime = new Date(utcTime + (3600000 * 5.5));
             const timeNum = lkTime.getHours() + lkTime.getMinutes() / 60;
-            
+
             if (timeNum >= 12.5 && timeNum < 13.5) {
                 setKillzoneStatus("London Silver Bullet Active");
                 setKillzoneColor("text-emerald-400 font-bold");
@@ -126,9 +127,13 @@ export default function App() {
             }
         }, 1000);
 
-        fetchNotionData();
         return () => clearInterval(timer);
     }, []);
+
+    // Database tab එක මාරු වන විට Notion Data අලුතින් Fetch කිරීම
+    useEffect(() => {
+        fetchNotionData();
+    }, [activeDatabase]);
 
     const toggleTheme = () => {
         setIsDark(prevDark => {
@@ -144,7 +149,6 @@ export default function App() {
         });
     };
 
-    // Always re-render charts with correct grid line colors when theme or trades list changes
     useEffect(() => {
         if (filteredTradesList.length > 0 || trades.length > 0) {
             renderCharts(filteredTradesList.length > 0 ? filteredTradesList : trades);
@@ -152,19 +156,19 @@ export default function App() {
     }, [isDark]);
 
     const fetchNotionData = async () => {
-        setSyncStatus({ text: "Notion Connected", dot: "bg-emerald-400", pulse: true });
+        setSyncStatus({ text: `Fetching ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion...`, dot: "bg-emerald-400", pulse: true });
         try {
-            const response = await fetch('/api/notion');
+            const response = await fetch(`/api/notion?type=${activeDatabase}`);
             if (response.ok) {
                 const fetchedData = await response.json();
                 if (fetchedData && fetchedData.results) {
-                    setSyncStatus({ text: "Live Notion Connected", dot: "bg-emerald-400", pulse: true });
+                    setSyncStatus({ text: `${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion Connected`, dot: "bg-emerald-400", pulse: true });
                     parseNotionData(fetchedData.results);
                     playSound('win');
                     return;
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
         setSyncStatus({ text: "Notion Sync Error", dot: "bg-rose-500", pulse: false });
         playSound('loss');
     };
@@ -173,7 +177,7 @@ export default function App() {
         const parsedTrades = results.map((item, index) => {
             const props = item.properties;
             const dateStr = props['DATE']?.date?.start || props['Date']?.date?.start || 'N/A';
-            
+
             let dayOfWeek = 'N/A';
             let monthYearKey = 'N/A';
             if (dateStr !== 'N/A') {
@@ -193,7 +197,7 @@ export default function App() {
 
             const rawSession = props['SESSION & TIME']?.select?.name || props['Session']?.select?.name || 'N/A';
             const rr = props['PLANNED R:R']?.number || props['RR']?.number || 2.0;
-            
+
             const setupScoreProp = props['SETUP SCORE'] || props['Setup Score'] || props['EXECUTION RULES'];
             let setupScoreVal = 'N/A';
             if (setupScoreProp) {
@@ -220,13 +224,13 @@ export default function App() {
             const profitAmt = props['PROFITE AMOUNT']?.number || props['Profit Amount']?.number || 0;
             const lossAmt = props['LOSS AMOUNT']?.number || props['Loss Amount']?.number || 0;
             const genericPnL = props['PROFIT/LOSS AMOUNT']?.number || props['PnL']?.number || 0;
-            
+
             let pnl = genericPnL;
             if (profitAmt > 0) pnl = profitAmt;
             else if (lossAmt > 0) pnl = -Math.abs(lossAmt);
 
             const outcome = props['OUTCOME']?.select?.name || props['Outcome']?.select?.name || (pnl >= 0 ? 'Win' : 'Loss');
-            
+
             const beforeFiles = props['BEFORE CHART']?.files || props['Before Chart']?.files || [];
             const afterFiles = props['AFTER CHART']?.files || props['After Chart']?.files || [];
 
@@ -288,7 +292,10 @@ export default function App() {
 
         if (bestMonth !== 'N/A') {
             setBestMonthName(bestMonth);
-            setBestMonthPnL(`${highestMonthPnL >= 0 ? '+' : ''}$${highestMonthPnL.toLocaleString('en-US', {minimumFractionDigits: 2})}`);
+            setBestMonthPnL(`${highestMonthPnL >= 0 ? '+' : ''}$${highestMonthPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+        } else {
+            setBestMonthName('N/A');
+            setBestMonthPnL('$0.00');
         }
 
         const totalTrades = data.length;
@@ -296,7 +303,7 @@ export default function App() {
         const profitFactor = totalLossAmount > 0 ? (totalWinAmount / totalLossAmount).toFixed(2) : totalWinAmount.toFixed(2);
         const rMultiple = (totalPnL / 150).toFixed(1);
 
-        setKpiNetProfit(`${totalPnL >= 0 ? '+' : ''}$${totalPnL.toLocaleString('en-US', {minimumFractionDigits: 2})}`);
+        setKpiNetProfit(`${totalPnL >= 0 ? '+' : ''}$${totalPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
         setKpiRMultiple(`${rMultiple >= 0 ? '+' : ''}${rMultiple} R`);
         setKpiWinRate(`${winRate}%`);
         setKpiWinLossRatio(`${wins}W / ${losses}L`);
@@ -310,7 +317,7 @@ export default function App() {
         const textColor = isDark ? '#64748B' : '#94A3B8';
 
         let cumulative = 0;
-        const eqLabels = ['Start', ...data.map((_, i) => `T-${i+1}`)];
+        const eqLabels = ['Start', ...data.map((_, i) => `T-${i + 1}`)];
         const eqData = [0, ...data.map(t => { cumulative += t.pnl; return cumulative; })];
 
         if (equityInstance.current) equityInstance.current.destroy();
@@ -341,13 +348,13 @@ export default function App() {
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { 
-                            grid: { display: false }, 
-                            ticks: { color: textColor, font: { size: 10 }, maxRotation: 45 } 
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: textColor, font: { size: 10 }, maxRotation: 45 }
                         },
-                        y: { 
-                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false }, 
-                            ticks: { color: textColor, font: { size: 10 } } 
+                        y: {
+                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false },
+                            ticks: { color: textColor, font: { size: 10 } }
                         }
                     }
                 }
@@ -400,13 +407,13 @@ export default function App() {
                     maintainAspectRatio: false,
                     plugins: { legend: { labels: { color: textColor, font: { size: 11 } } } },
                     scales: {
-                        x: { 
-                            grid: { display: false }, 
-                            ticks: { color: textColor, font: { size: 11 } } 
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: textColor, font: { size: 11 } }
                         },
-                        y: { 
-                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false }, 
-                            ticks: { color: textColor, font: { size: 10 } } 
+                        y: {
+                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false },
+                            ticks: { color: textColor, font: { size: 10 } }
                         }
                     }
                 }
@@ -456,13 +463,13 @@ export default function App() {
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false } },
                     scales: {
-                        x: { 
-                            grid: { display: false }, 
-                            ticks: { color: textColor, font: { size: 11 } } 
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: textColor, font: { size: 11 } }
                         },
-                        y: { 
-                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false }, 
-                            ticks: { color: textColor, font: { size: 10 } } 
+                        y: {
+                            grid: { color: ultraSubtleGridColor, lineWidth: 1, drawTicks: false },
+                            ticks: { color: textColor, font: { size: 10 } }
                         }
                     }
                 }
@@ -508,7 +515,7 @@ export default function App() {
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", "MintPip_Trade_Journal.csv");
+        link.setAttribute("download", `MintPip_${activeDatabase.toUpperCase()}_Trade_Journal.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -519,11 +526,11 @@ export default function App() {
 
     return (
         <div className={`min-h-screen flex flex-col antialiased transition-colors duration-300 ${isDark ? 'bg-[#07090E] text-[#E5E7EB]' : 'bg-[#F4F6F9] text-[#1E293B]'}`}>
-            
+
             {/* Top Bar */}
             <header className={`sticky top-0 z-30 px-6 lg:px-12 py-3 border-b backdrop-blur-xl transition-all duration-300 ${isDark ? 'bg-[#090D16]/80 border-white/15 shadow-2xl shadow-black/40' : 'bg-white/85 border-gray-200/80 shadow-sm'}`}>
-                <div className="w-full flex items-center justify-between gap-4">
-                    
+                <div className="w-full flex items-center justify-between gap-4 flex-wrap">
+
                     {/* Left Branding */}
                     <div className="flex items-center space-x-6">
                         <div className="flex items-center space-x-3 group cursor-pointer">
@@ -545,27 +552,53 @@ export default function App() {
                             </div>
                         </div>
 
+                        {/* Database Toggle Switcher (Live / Backtest) */}
+                        <div className={`flex items-center p-1 rounded-xl border ${isDark ? 'bg-[#0E1526] border-white/10' : 'bg-gray-100 border-gray-200'}`}>
+                            <button
+                                onClick={() => setActiveDatabase('live')}
+                                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeDatabase === 'live'
+                                        ? 'bg-[#3874FF] text-white shadow-md'
+                                        : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
+                                    }`}
+                            >
+                                <span className={`w-2 h-2 rounded-full ${activeDatabase === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`}></span>
+                                Forword Test
+                            </button>
+                            <button
+                                onClick={() => setActiveDatabase('backtest')}
+                                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeDatabase === 'backtest'
+                                        ? 'bg-[#3874FF] text-white shadow-md'
+                                        : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
+                                    }`}
+                            >
+                                {/* Modern Analytics/Chart SVG Icon */}
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                                </svg>
+                                Backtest Data
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Right Controls */}
+                    <div className="flex items-center space-x-2.5">
+
                         {/* Killzone Status */}
-                        <div className={`hidden md:flex items-center space-x-2.5 px-3.5 py-1.5 rounded-full border text-xs font-semibold shadow-inner ${isDark ? 'bg-[#0E1526]/80 border-white/10' : 'bg-gray-100/80 border-gray-200'}`}>
+                        <div className={`hidden xl:flex items-center space-x-2.5 px-3.5 py-1.5 rounded-full border text-xs font-semibold shadow-inner ${isDark ? 'bg-[#0E1526]/80 border-white/10' : 'bg-gray-100/80 border-gray-200'}`}>
                             <span className="relative flex h-2 w-2">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#3874FF] opacity-75"></span>
                                 <span className="relative inline-flex rounded-full h-2 w-2 bg-[#3874FF]"></span>
                             </span>
                             <span className={killzoneColor}>{killzoneStatus}</span>
                         </div>
-                    </div>
 
-                    {/* Right Controls */}
-                    <div className="flex items-center space-x-2.5">
-                        
                         {/* Risk Calculator Button */}
-                        <button 
-                            onClick={() => setIsCalcOpen(true)} 
-                            className={`hidden sm:flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 ${
-                                isDark 
-                                    ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-gray-200 hover:border-[#3874FF]/50 shadow-sm' 
+                        <button
+                            onClick={() => setIsCalcOpen(true)}
+                            className={`hidden sm:flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs font-semibold transition-all duration-200 ${isDark
+                                    ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-gray-200 hover:border-[#3874FF]/50 shadow-sm'
                                     : 'bg-white hover:bg-gray-50 border-gray-200 text-gray-700 shadow-sm'
-                            }`}
+                                }`}
                         >
                             <svg className="w-4 h-4 text-[#3874FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
@@ -574,13 +607,12 @@ export default function App() {
                         </button>
 
                         {/* Theme Toggle Button */}
-                        <button 
-                            onClick={toggleTheme} 
-                            className={`w-9 h-9 rounded-xl border transition-all duration-200 flex items-center justify-center text-sm shadow-sm ${
-                                isDark 
-                                    ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-amber-400' 
+                        <button
+                            onClick={toggleTheme}
+                            className={`w-9 h-9 rounded-xl border transition-all duration-200 flex items-center justify-center text-sm shadow-sm ${isDark
+                                    ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-amber-400'
                                     : 'bg-white hover:bg-gray-50 border-gray-200 text-slate-700'
-                            }`} 
+                                }`}
                             title="Toggle Theme"
                         >
                             {isDark ? (
@@ -604,8 +636,8 @@ export default function App() {
                         </div>
 
                         {/* Refresh Button */}
-                        <button 
-                            onClick={fetchNotionData} 
+                        <button
+                            onClick={fetchNotionData}
                             className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#3874FF] to-blue-600 hover:from-blue-600 hover:to-indigo-600 text-white font-semibold transition-all duration-200 flex items-center gap-2 text-xs shadow-md shadow-blue-500/20 active:scale-95"
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -620,15 +652,15 @@ export default function App() {
 
             {/* Main Container */}
             <main className="flex-1 w-full px-6 lg:px-12 py-6 space-y-6">
-                
+
                 {/* KPI Cards Grid */}
                 <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    
+
                     {/* Card 1: Total Net PnL */}
                     <div className={`relative p-6 rounded-3xl border shadow-[0_8px_30px_rgb(0,0,0,0.12)] backdrop-blur-xl group hover:border-emerald-400 hover:shadow-[0_0_25px_rgba(16,185,129,0.2)] transition-all duration-300 transform hover:-translate-y-1.5 overflow-hidden ${isDark ? 'bg-gradient-to-br from-[#0D111A] via-[#0E1525] to-[#0A0E17] border-emerald-500/30' : 'bg-gradient-to-br from-white via-gray-50 to-emerald-50/30 border-emerald-500/30'}`}>
                         <div className="absolute -right-6 -bottom-6 w-28 h-28 bg-emerald-500/10 rounded-full blur-2xl group-hover:bg-emerald-500/20 transition-all"></div>
                         <div className="flex items-center justify-between mb-3 relative z-10">
-                            <span className="text-xs uppercase tracking-wider font-extrabold text-emerald-500">Total Net PnL</span>
+                            <span className="text-xs uppercase tracking-wider font-extrabold text-emerald-500">Total Net PnL ({activeDatabase.toUpperCase()})</span>
                             <div className="p-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shadow-inner">
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -704,7 +736,7 @@ export default function App() {
 
                 {/* Charts Section */}
                 <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    
+
                     {/* Cumulative Equity Growth Chart */}
                     <div className={`p-6 rounded-3xl border shadow-[0_8px_30px_rgb(0,0,0,0.12)] backdrop-blur-xl lg:col-span-2 flex flex-col justify-between transition-all duration-300 hover:shadow-[0_0_25px_rgba(56,116,255,0.15)] ${isDark ? 'bg-gradient-to-br from-[#0D111A] via-[#0E1525] to-[#0A0E17] border-white/10' : 'bg-gradient-to-br from-white via-gray-50 to-blue-50/20 border-gray-200'}`}>
                         <div className="flex items-center justify-between mb-4">
@@ -713,7 +745,7 @@ export default function App() {
                                     <svg className="w-5 h-5 text-[#3874FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
                                     </svg>
-                                    Cumulative Equity Growth
+                                    Cumulative Equity Growth ({activeDatabase.toUpperCase()})
                                 </h2>
                                 <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Account balance progression over executions</p>
                             </div>
@@ -755,7 +787,7 @@ export default function App() {
 
                 {/* Secondary Analytics Section */}
                 <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    
+
                     {/* Performance by Session */}
                     <div className={`p-6 rounded-3xl border shadow-[0_8px_30px_rgb(0,0,0,0.12)] backdrop-blur-xl flex flex-col justify-between transition-all duration-300 hover:shadow-[0_0_25px_rgba(16,185,129,0.15)] ${isDark ? 'bg-gradient-to-br from-[#0D111A] via-[#0E1525] to-[#0A0E17] border-white/10' : 'bg-gradient-to-br from-white via-gray-50 to-emerald-50/20 border-gray-200'}`}>
                         <div className="flex items-center justify-between mb-4">
@@ -805,9 +837,9 @@ export default function App() {
                                 <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
                                 </svg>
-                                Notion Trade Journal Executions
+                                Notion Trade Journal Executions ({activeDatabase.toUpperCase()})
                             </h2>
-                            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Live data fetched directly from Notion Database</p>
+                            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Data fetched directly from Notion Database</p>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
@@ -863,8 +895,8 @@ export default function App() {
                                 {currentTableData.map((trade) => {
                                     const isWin = trade.result === 'Win';
                                     const combinedItems = [
-                                        ...trade.beforeCharts.map((url, i) => ({ url, type: `Before Chart ${i+1}` })),
-                                        ...trade.afterCharts.map((url, i) => ({ url, type: `After Chart ${i+1}` }))
+                                        ...trade.beforeCharts.map((url, i) => ({ url, type: `Before Chart ${i + 1}` })),
+                                        ...trade.afterCharts.map((url, i) => ({ url, type: `After Chart ${i + 1}` }))
                                     ];
                                     return (
                                         <tr key={trade.id} className={`transition ${isDark ? 'hover:bg-[#131926]/70' : 'hover:bg-gray-50'}`}>
@@ -961,11 +993,10 @@ export default function App() {
                                     </svg>
                                     {modalTitle}
                                 </h3>
-                                <span className={`text-[11px] px-3 py-1 rounded-full font-extrabold uppercase tracking-wider border ${
-                                    activeItems[activeImgIndex].type.includes('Before') 
-                                        ? 'bg-blue-500/10 text-[#3874FF] border-blue-500/30' 
+                                <span className={`text-[11px] px-3 py-1 rounded-full font-extrabold uppercase tracking-wider border ${activeItems[activeImgIndex].type.includes('Before')
+                                        ? 'bg-blue-500/10 text-[#3874FF] border-blue-500/30'
                                         : 'bg-purple-500/10 text-purple-400 border-purple-500/30'
-                                }`}>
+                                    }`}>
                                     {activeItems[activeImgIndex].type}
                                 </span>
                             </div>
@@ -973,7 +1004,7 @@ export default function App() {
                             <div className="flex items-center gap-2">
                                 {activeItems.length > 1 && (
                                     <div className={`flex items-center border rounded-2xl p-1 text-xs ${isDark ? 'bg-[#131926] border-[#1E2638]' : 'bg-gray-100 border-gray-200'}`}>
-                                        <button 
+                                        <button
                                             onClick={() => setActiveImgIndex(prev => (prev === 0 ? activeItems.length - 1 : prev - 1))}
                                             className={`px-3 py-1.5 rounded-xl transition font-semibold ${isDark ? 'bg-[#0D111A] hover:bg-[#3874FF] text-white' : 'bg-white hover:bg-gray-200 text-gray-800 shadow-sm'}`}>
                                             ◀ Prev
@@ -981,7 +1012,7 @@ export default function App() {
                                         <span className={`px-3 font-bold text-xs ${isDark ? 'text-gray-300' : 'text-gray-800'}`}>
                                             {activeImgIndex + 1} / {activeItems.length}
                                         </span>
-                                        <button 
+                                        <button
                                             onClick={() => setActiveImgIndex(prev => (prev === activeItems.length - 1 ? 0 : prev + 1))}
                                             className={`px-3 py-1.5 rounded-xl transition font-semibold ${isDark ? 'bg-[#0D111A] hover:bg-[#3874FF] text-white' : 'bg-white hover:bg-gray-200 text-gray-800 shadow-sm'}`}>
                                             Next ▶
@@ -1000,11 +1031,10 @@ export default function App() {
                                     <button
                                         key={idx}
                                         onClick={() => setActiveImgIndex(idx)}
-                                        className={`px-3 py-1 rounded-xl border font-medium transition whitespace-nowrap ${
-                                            activeImgIndex === idx 
-                                                ? 'bg-[#3874FF] text-white border-[#3874FF]' 
+                                        className={`px-3 py-1 rounded-xl border font-medium transition whitespace-nowrap ${activeImgIndex === idx
+                                                ? 'bg-[#3874FF] text-white border-[#3874FF]'
                                                 : isDark ? 'bg-[#131926] text-gray-400 border-[#1E2638] hover:text-white' : 'bg-gray-100 text-gray-600 border-gray-200 hover:text-gray-900'
-                                        }`}
+                                            }`}
                                     >
                                         {item.type}
                                     </button>

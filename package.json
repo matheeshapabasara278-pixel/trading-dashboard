@@ -6,9 +6,14 @@
     "server"
   ],
   "scripts": {
-    "dev": "npm run dev --prefix client"
+    "server": "node server/index.js",
+    "client": "npm run dev --prefix client",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
   },
   "dependencies": {
     "serverless-http": "^4.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
   }
 }

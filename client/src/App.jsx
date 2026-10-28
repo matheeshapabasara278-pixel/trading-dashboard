@@ -316,9 +316,12 @@ export default function App() {
         const ultraSubtleGridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
         const textColor = isDark ? '#64748B' : '#94A3B8';
 
+        // පරණ trades මුලට (Start -> T-1 -> ... -> Latest) එන සේ reverse කිරීම
+        const sortedTrades = [...data].reverse();
+
         let cumulative = 0;
-        const eqLabels = ['Start', ...data.map((_, i) => `T-${i + 1}`)];
-        const eqData = [0, ...data.map(t => { cumulative += t.pnl; return cumulative; })];
+        const eqLabels = ['Start', ...sortedTrades.map((_, i) => `T-${i + 1}`)];
+        const eqData = [0, ...sortedTrades.map(t => { cumulative += t.pnl; return cumulative; })];
 
         if (equityInstance.current) equityInstance.current.destroy();
         if (equityChartRef.current) {
@@ -346,7 +349,41 @@ export default function App() {
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    plugins: { 
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: isDark ? '#0E1526' : '#ffffff',
+                            titleColor: isDark ? '#ffffff' : '#111827',
+                            bodyColor: isDark ? '#34D399' : '#059669',
+                            borderColor: isDark ? 'rgba(255,255,255,0.1)' : '#e5e7eb',
+                            borderWidth: 1,
+                            padding: 12,
+                            callbacks: {
+                                label: function(context) {
+                                    const index = context.dataIndex;
+                                    const balance = context.parsed.y;
+                                    
+                                    // Start point එක සඳහා PnL නැත
+                                    if (index === 0) {
+                                        return `Starting Balance: $${balance.toFixed(2)}`;
+                                    }
+                                    
+                                    // අදාළ Trade එක sortedTrades array එකෙන් ලබා ගැනීම
+                                    const trade = sortedTrades[index - 1];
+                                    if (!trade) return `Balance: $${balance.toFixed(2)}`;
+
+                                    const pnl = trade.pnl;
+                                    const sign = pnl >= 0 ? '+' : '';
+                                    const pnlStr = `${sign}$${pnl.toFixed(2)}`;
+                                    
+                                    return [
+                                        `Balance: $${balance.toFixed(2)}`,
+                                        `Trade PnL: ${pnlStr} (${trade.pair})`
+                                    ];
+                                }
+                            }
+                        }
+                    },
                     scales: {
                         x: {
                             grid: { display: false },

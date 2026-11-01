@@ -1,6 +1,40 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Chart from 'chart.js/auto';
 
+// Default (empty) state of the Add Trade form
+const getDefaultTradeForm = () => ({
+    date: new Date().toLocaleDateString('en-CA'), // local date (YYYY-MM-DD)
+    pairDirection: 'GBP/USD - SELL',
+    session: 'LN SILVER BULLET',
+    fvgTap: 'YES',
+    smtDivergence: 'YES (GU HH & EU LH)',
+    executionRules: ['Time Filter', 'HTF Context (15min FVG)', '1min MSS & FVG Entry'],
+    entryPrice: '',
+    slPrice: '',
+    planeTarget: '1:2 (0p : 0p)',
+    lotSizeRisk: '1.0',
+    outcome: 'Win',
+    profitAmount: '150',
+    lossAmount: '0',
+    psychologicalState: ['CALM', 'PATIENT'],
+    beforeCharts: '', // optional image links (comma / new line separated)
+    afterCharts: '',
+    beforeChartFiles: [], // images selected from the computer (multiple allowed)
+    afterChartFiles: [],
+    note: ''
+});
+
+// Always show prices with 5 decimals (1.3 -> 1.30000). Returns '' for empty / invalid input
+const formatPrice5 = (value) => {
+    const num = parseFloat(value);
+    return Number.isFinite(num) ? num.toFixed(5) : '';
+};
+
+// Counts image links typed in the URL box (separated by comma or new line)
+const countLinks = (text) => String(text || '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean).length;
+
+const MAX_IMAGES_PER_CHART = 10;
+
 export default function App() {
     const [activeDatabase, setActiveDatabase] = useState('live'); // 'live' kinva 'backtest'
     const [trades, setTrades] = useState([]);
@@ -10,16 +44,22 @@ export default function App() {
     const [killzoneStatus, setKillzoneStatus] = useState("Checking Sri Lanka Killzone...");
     const [killzoneColor, setKillzoneColor] = useState("text-gray-400");
     const [syncStatus, setSyncStatus] = useState({ text: "Fetching Notion...", dot: "bg-emerald-400", pulse: true });
-    
-    // 🌟 Notion Success Notification Toast State (Top position)
+
+    // Notion Success Notification Toast State (Top position)
     const [notionToast, setNotionToast] = useState({ show: false, message: "", type: "success" });
+
+    // 🌟 Advanced Add Trade Modal States
+    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const [isSubmittingTrade, setIsSubmittingTrade] = useState(false);
+
+    const [newTradeForm, setNewTradeForm] = useState(getDefaultTradeForm);
 
     // Calendar States
     const [calMonth, setCalMonth] = useState(new Date().getMonth());
     const [calYear, setCalYear] = useState(new Date().getFullYear());
 
     // Custom Date Range States for PDF Report
-    const [reportMode, setReportMode] = useState('month'); 
+    const [reportMode, setReportMode] = useState('month');
     const [customStartDate, setCustomStartDate] = useState('');
     const [customEndDate, setCustomEndDate] = useState('');
 
@@ -78,6 +118,39 @@ export default function App() {
     const timeframeInstance = useRef(null);
     const sidePieInstance = useRef(null);
 
+    // 🌟 Result popup (save success / error / validation) + helpers for live refresh
+    const [resultPopup, setResultPopup] = useState({ show: false, type: 'success', title: '', message: '', items: [] });
+    const [formKey, setFormKey] = useState(0); // remounts file inputs after a successful save
+    const popupTimerRef = useRef(null);
+    const isDarkRef = useRef(true);
+    const timeframeModeRef = useRef('weekly');
+    const lastDataSigRef = useRef(null);
+    const fetchSeqRef = useRef(0);
+    isDarkRef.current = isDark;
+    timeframeModeRef.current = currentTimeframeMode;
+
+    const closeResultPopup = () => {
+        if (popupTimerRef.current) clearTimeout(popupTimerRef.current);
+        setResultPopup(prev => ({ ...prev, show: false }));
+    };
+
+    // Closing the Add Trade window (any way: X, Cancel, outside click, Esc, after save) clears every input
+    const closeAddModal = () => {
+        setIsAddModalOpen(false);
+        setNewTradeForm(getDefaultTradeForm());
+        setFormKey(k => k + 1);
+    };
+
+    const showResultPopup = (type, title, message, items = [], autoCloseMs = 0) => {
+        if (popupTimerRef.current) clearTimeout(popupTimerRef.current);
+        setResultPopup({ show: true, type, title, message, items });
+        if (autoCloseMs > 0) {
+            popupTimerRef.current = setTimeout(() => {
+                setResultPopup(prev => ({ ...prev, show: false }));
+            }, autoCloseMs);
+        }
+    };
+
     const showToast = (message, type = 'success') => {
         setNotionToast({ show: true, message, type });
         setTimeout(() => {
@@ -113,7 +186,6 @@ export default function App() {
         } catch (e) { }
     };
 
-    // Keyboard Arrow Keys & Escape Key Event Listener
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.key === 'Escape') {
@@ -121,6 +193,8 @@ export default function App() {
                 setIsDetailsOpen(false);
                 setIsAiOpen(false);
                 setIsDateModalOpen(false);
+                closeAddModal();
+                setResultPopup(prev => ({ ...prev, show: false }));
             }
 
             if (isChartOpen && activeItems.length > 1) {
@@ -165,21 +239,31 @@ export default function App() {
         return () => clearInterval(timer);
     }, []);
 
-    // 🌟 Auto-Refresh (Polling) every 15 seconds to fetch latest trades from Notion without manual refresh
+    // Auto-Refresh (Polling) every 15 seconds + Initial fetch
     useEffect(() => {
         setReportMode('month');
         setCustomStartDate('');
         setCustomEndDate('');
         setCalMonth(new Date().getMonth());
         setCalYear(new Date().getFullYear());
-        
-        fetchNotionData(); // Initial fetch
 
-        const autoRefreshInterval = setInterval(() => {
-            fetchNotionData(true); // Silent background fetch
-        }, 15000); // 15 seconds
+        lastDataSigRef.current = null; // force a fresh parse when switching database
+        fetchNotionData();
 
-        return () => clearInterval(autoRefreshInterval);
+        // 🔄 Live sync: poll every 5s (only while the tab is visible) + refresh instantly when the tab regains focus
+        const silentRefresh = () => {
+            if (!document.hidden) fetchNotionData(true);
+        };
+
+        const autoRefreshInterval = setInterval(silentRefresh, 5000);
+        window.addEventListener('focus', silentRefresh);
+        document.addEventListener('visibilitychange', silentRefresh);
+
+        return () => {
+            clearInterval(autoRefreshInterval);
+            window.removeEventListener('focus', silentRefresh);
+            document.removeEventListener('visibilitychange', silentRefresh);
+        };
     }, [activeDatabase]);
 
     const toggleTheme = () => {
@@ -206,13 +290,21 @@ export default function App() {
         if (!isSilent) {
             setSyncStatus({ text: `Fetching ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion...`, dot: "bg-emerald-400", pulse: true });
         }
+        const seq = ++fetchSeqRef.current; // ignore out-of-date responses (e.g. after switching database)
         try {
             const response = await fetch(`/api/notion?type=${activeDatabase}`);
+            if (seq !== fetchSeqRef.current) return;
             if (response.ok) {
                 const fetchedData = await response.json();
+                if (seq !== fetchSeqRef.current) return;
                 if (fetchedData && fetchedData.results) {
                     setSyncStatus({ text: `${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion Connected`, dot: "bg-emerald-400", pulse: true });
-                    parseNotionData(fetchedData.results);
+
+                    // Only re-render when something really changed in Notion (signed file URLs change on every request, so they are ignored)
+                    const signature = JSON.stringify(fetchedData.results, (key, value) => (key === 'url' || key === 'expiry_time') ? undefined : value);
+                    const changed = !isSilent || signature !== lastDataSigRef.current;
+                    lastDataSigRef.current = signature;
+                    if (changed) parseNotionData(fetchedData.results);
                     if (!isSilent) {
                         playSound('win');
                         showToast(`✅ Notion Connected Successfully! (${activeDatabase.toUpperCase()} Database synced)`, 'success');
@@ -221,7 +313,7 @@ export default function App() {
                 }
             }
         } catch (e) { }
-        
+
         if (!isSilent) {
             setSyncStatus({ text: "Notion Sync Error", dot: "bg-rose-500", pulse: false });
             playSound('loss');
@@ -229,8 +321,113 @@ export default function App() {
         }
     };
 
+    // 🌟 Submit new trade to backend API to save in Notion
+    const handleSaveNewTrade = async (e) => {
+        e.preventDefault();
+
+        // ✅ Validation: Entry Price, SL Price and both chart images are required
+        const missing = [];
+        if (!newTradeForm.date) missing.push('Date');
+        if (!String(newTradeForm.entryPrice).trim()) missing.push('Entry Price');
+        if (!String(newTradeForm.slPrice).trim()) missing.push('SL Price');
+        if (newTradeForm.beforeChartFiles.length === 0 && countLinks(newTradeForm.beforeCharts) === 0) missing.push('Before Chart image (upload a file or paste a link)');
+        if (newTradeForm.afterChartFiles.length === 0 && countLinks(newTradeForm.afterCharts) === 0) missing.push('After Chart image (upload a file or paste a link)');
+
+        if (missing.length > 0) {
+            playSound('loss');
+            showResultPopup('error', 'Missing required fields', 'Please complete the following before saving this trade:', missing);
+            return;
+        }
+
+        setIsSubmittingTrade(true);
+
+        try {
+            const formData = new FormData();
+            formData.append('databaseType', activeDatabase); // 'live' or 'backtest'
+
+            // Text fields
+            formData.append('date', newTradeForm.date);
+            formData.append('pairDirection', newTradeForm.pairDirection);
+            formData.append('session', newTradeForm.session);
+            formData.append('fvgTap', newTradeForm.fvgTap);
+            formData.append('smtDivergence', newTradeForm.smtDivergence);
+            formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
+            formData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+            formData.append('planeTarget', newTradeForm.planeTarget);
+            formData.append('lotSizeRisk', newTradeForm.lotSizeRisk);
+            formData.append('outcome', newTradeForm.outcome);
+            formData.append('profitAmount', newTradeForm.profitAmount);
+            formData.append('lossAmount', newTradeForm.lossAmount);
+            formData.append('beforeCharts', newTradeForm.beforeCharts); // optional image URL(s)
+            formData.append('afterCharts', newTradeForm.afterCharts);   // optional image URL(s)
+            formData.append('note', newTradeForm.note);
+
+            // Array fields are sent as JSON strings (use JSON.parse on the backend)
+            formData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
+            formData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
+
+            // Image files (only if selected)
+            newTradeForm.beforeChartFiles.forEach(file => formData.append('beforeChart', file));
+            newTradeForm.afterChartFiles.forEach(file => formData.append('afterChart', file));
+
+            // Do NOT set Content-Type manually: the browser adds the multipart boundary
+            const response = await fetch('/api/notion/add', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) {
+                playSound('win');
+                closeAddModal();
+                showResultPopup('success', 'Trade Saved!', `Your ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} trade was successfully saved to Notion.`, [], 3500);
+
+
+                fetchNotionData(true); // Refresh list immediately (silent, the popup already confirms the save)
+            } else {
+                let errMsg = `The server responded with status ${response.status}.`;
+                try {
+                    const rawText = await response.text();
+                    let detail = '';
+                    try {
+                        const errData = JSON.parse(rawText);
+                        detail = (errData && (errData.error || errData.message)) || '';
+                    } catch (_) {
+                        // Not JSON: show plain text only (ignore HTML error pages)
+                        if (rawText && !rawText.trim().startsWith('<') && rawText.length < 300) detail = rawText.trim();
+                    }
+                    if (detail) {
+                        errMsg = detail;
+                    } else if (response.status >= 500) {
+                        errMsg += ' The server gave no details: check the server terminal for the error and make sure the server was restarted with the latest index.js.';
+                    }
+                } catch (_) { }
+                if (response.status === 404) {
+                    errMsg += ' (API route not found: check that the server is running and the Vite proxy points to it.)';
+                }
+                playSound('loss');
+                showResultPopup('error', 'Failed to save trade', errMsg);
+            }
+        } catch (err) {
+            playSound('loss');
+            showResultPopup('error', 'Network error', 'Could not reach the server. Please make sure the backend is running, then try again.');
+        } finally {
+            setIsSubmittingTrade(false);
+        }
+    };
+
     const parseNotionData = (results) => {
-        const parsedTrades = results.map((item, index) => {
+        // Oldest -> newest (by DATE, then by the time it was added to Notion): newest trade is always last
+        const sortedResults = [...results].sort((a, b) => {
+            const dA = a.properties?.['DATE']?.date?.start || a.properties?.['Date']?.date?.start || '';
+            const dB = b.properties?.['DATE']?.date?.start || b.properties?.['Date']?.date?.start || '';
+            if (dA !== dB) return dA < dB ? -1 : 1;
+            const cA = a.created_time || '';
+            const cB = b.created_time || '';
+            if (cA !== cB) return cA < cB ? -1 : 1;
+            return 0;
+        });
+
+        const parsedTrades = sortedResults.map((item, index) => {
             const props = item.properties;
             const dateStr = props['DATE']?.date?.start || props['Date']?.date?.start || 'N/A';
 
@@ -271,8 +468,8 @@ export default function App() {
                 if (match && match[1]) {
                     const pipsParts = match[1].split(':');
                     if (pipsParts.length === 2) {
-                        slPipsVal = pipsParts[0].trim();
-                        tpPipsVal = pipsParts[1].trim();
+                        slPipsVal = pipsParts[0].trim().replace(/p$/i, '');
+                        tpPipsVal = pipsParts[1].trim().replace(/p$/i, '');
                     }
                 }
             }
@@ -421,10 +618,11 @@ export default function App() {
     };
 
     const renderCharts = (data) => {
+        const isDark = isDarkRef.current; // always use the latest theme (polling closures can be stale)
         const ultraSubtleGridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
         const textColor = isDark ? '#64748B' : '#94A3B8';
 
-        const sortedTrades = [...data].reverse();
+        const sortedTrades = [...data]; // already oldest -> newest
 
         let cumulative = 0;
         const eqLabels = ['Start', ...sortedTrades.map((_, i) => `T-${i + 1}`)];
@@ -456,7 +654,7 @@ export default function App() {
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { 
+                    plugins: {
                         legend: { display: false },
                         tooltip: {
                             backgroundColor: isDark ? '#0E1526' : '#ffffff',
@@ -466,7 +664,7 @@ export default function App() {
                             borderWidth: 1,
                             padding: 12,
                             callbacks: {
-                                label: function(context) {
+                                label: function (context) {
                                     const index = context.dataIndex;
                                     const balance = context.parsed.y;
                                     if (index === 0) {
@@ -478,7 +676,7 @@ export default function App() {
                                     const pnl = trade.pnl;
                                     const sign = pnl >= 0 ? '+' : '';
                                     const pnlStr = `${sign}$${pnl.toFixed(2)}`;
-                                    
+
                                     return [
                                         `Balance: $${balance.toFixed(2)}`,
                                         `Trade PnL: ${pnlStr} (${trade.pair})`
@@ -585,10 +783,11 @@ export default function App() {
             });
         }
 
-        renderTimeframeChart(data, currentTimeframeMode);
+        renderTimeframeChart(data, timeframeModeRef.current);
     };
 
     const renderTimeframeChart = (data, mode) => {
+        const isDark = isDarkRef.current;
         const ultraSubtleGridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
         const textColor = isDark ? '#64748B' : '#94A3B8';
 
@@ -684,7 +883,7 @@ export default function App() {
         const tempEquityCanvas = document.createElement('canvas');
         tempEquityCanvas.width = 600;
         tempEquityCanvas.height = 300;
-        const sortedFiltered = [...filteredTrades].reverse();
+        const sortedFiltered = [...filteredTrades]; // already oldest -> newest
         let cum = 0;
         const eqLbls = ['Start', ...sortedFiltered.map((_, i) => `T-${i + 1}`)];
         const eqVals = [0, ...sortedFiltered.map(t => { cum += t.pnl; return cum; })];
@@ -908,7 +1107,7 @@ export default function App() {
             targetTrades = trades.filter(t => t.monthYear === lastMonthKey);
         }
 
-        const tradesSummary = targetTrades.slice(0, 25).map(t => ({
+        const tradesSummary = targetTrades.slice(-25) /* latest 25 trades */.map(t => ({
             date: t.date,
             pair: t.pair,
             direction: t.direction,
@@ -919,8 +1118,8 @@ export default function App() {
             lesson: t.note
         }));
 
-        const languageInstruction = aiLang === 'sinhala' 
-            ? "Provide a concise, highly practical performance audit in Sinhala (with English key trading terms like ICT, FVG, MSS, Killzone)." 
+        const languageInstruction = aiLang === 'sinhala'
+            ? "Provide a concise, highly practical performance audit in Sinhala (with English key trading terms like ICT, FVG, MSS, Killzone)."
             : "Provide a concise, highly practical performance audit entirely in professional English.";
 
         const prompt = `You are a Senior Institutional Forex Analyst. Analyze the following trade journal data for a Forex trader (${aiTimeframe.toUpperCase()} timeframe):
@@ -943,7 +1142,7 @@ ${languageInstruction} Structure it as follows:
                     "X-Title": "MintPip Trading Journal"
                 },
                 body: JSON.stringify({
-                    model: "deepseek/deepseek-chat:free", 
+                    model: "deepseek/deepseek-chat:free",
                     messages: [{ role: "user", content: prompt }]
                 })
             });
@@ -1000,16 +1199,62 @@ ${languageInstruction} Structure it as follows:
     return (
         <div className={`min-h-screen flex flex-col antialiased transition-colors duration-300 ${isDark ? 'bg-[#07090E] text-[#E5E7EB]' : 'bg-[#F4F6F9] text-[#1E293B]'}`}>
 
-            {/* 🌟 Top Notion Notification Toast Pop-up */}
+            {/* Top Notion Notification Toast Pop-up */}
             {notionToast.show && (
                 <div className="fixed top-6 right-6 z-50 animate-bounce">
-                    <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl shadow-2xl border backdrop-blur-xl text-xs font-bold ${
-                        notionToast.type === 'success' 
-                            ? 'bg-emerald-950/90 border-emerald-500/40 text-emerald-300 shadow-emerald-500/20' 
+                    <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl shadow-2xl border backdrop-blur-xl text-xs font-bold ${notionToast.type === 'success'
+                            ? 'bg-emerald-950/90 border-emerald-500/40 text-emerald-300 shadow-emerald-500/20'
                             : 'bg-rose-950/90 border-rose-500/40 text-rose-300 shadow-rose-500/20'
-                    }`}>
+                        }`}>
                         <span className="text-base">{notionToast.type === 'success' ? '🎉' : '⚠️'}</span>
                         <span>{notionToast.message}</span>
+                    </div>
+                </div>
+            )}
+
+            {/* 🌟 Save Result Popup (success / error / validation) */}
+            {resultPopup.show && (
+                <div onClick={closeResultPopup} className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        className={`relative w-full max-w-md rounded-3xl border p-8 text-center shadow-2xl ${isDark ? 'bg-[#0D111A] text-gray-200' : 'bg-white text-gray-800'} ${resultPopup.type === 'success' ? 'border-emerald-500/40 shadow-emerald-500/20' : 'border-rose-500/40 shadow-rose-500/20'}`}
+                    >
+                        <div className={`mx-auto mb-4 w-16 h-16 rounded-full flex items-center justify-center border-2 ${resultPopup.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400' : 'bg-rose-500/10 border-rose-500/40 text-rose-400'}`}>
+                            {resultPopup.type === 'success' ? (
+                                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                                </svg>
+                            ) : (
+                                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            )}
+                        </div>
+
+                        <h3 className={`text-xl font-black tracking-tight ${resultPopup.type === 'success' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {resultPopup.title}
+                        </h3>
+                        <p className={`mt-2 text-sm leading-relaxed ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                            {resultPopup.message}
+                        </p>
+
+                        {resultPopup.items && resultPopup.items.length > 0 && (
+                            <ul className={`mt-4 text-left text-xs font-semibold space-y-2 p-4 rounded-2xl border ${isDark ? 'bg-rose-500/5 border-rose-500/20 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                                {resultPopup.items.map((item, idx) => (
+                                    <li key={idx} className="flex items-start gap-2">
+                                        <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0"></span>
+                                        <span>{item}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+
+                        <button
+                            onClick={closeResultPopup}
+                            className={`mt-6 w-full px-5 py-3 rounded-xl text-white text-sm font-bold transition active:scale-95 shadow-md ${resultPopup.type === 'success' ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20' : 'bg-rose-600 hover:bg-rose-500 shadow-rose-500/20'}`}
+                        >
+                            {resultPopup.type === 'success' ? 'Great!' : 'OK, got it'}
+                        </button>
                     </div>
                 </div>
             )}
@@ -1041,8 +1286,8 @@ ${languageInstruction} Structure it as follows:
                             <button
                                 onClick={() => setActiveDatabase('live')}
                                 className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeDatabase === 'live'
-                                        ? 'bg-[#3874FF] text-white shadow-md'
-                                        : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
+                                    ? 'bg-[#3874FF] text-white shadow-md'
+                                    : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
                                     }`}
                             >
                                 <span className={`w-2 h-2 rounded-full ${activeDatabase === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`}></span>
@@ -1051,8 +1296,8 @@ ${languageInstruction} Structure it as follows:
                             <button
                                 onClick={() => setActiveDatabase('backtest')}
                                 className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${activeDatabase === 'backtest'
-                                        ? 'bg-[#3874FF] text-white shadow-md'
-                                        : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
+                                    ? 'bg-[#3874FF] text-white shadow-md'
+                                    : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'
                                     }`}
                             >
                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1064,6 +1309,17 @@ ${languageInstruction} Structure it as follows:
                     </div>
 
                     <div className="flex items-center space-x-2.5">
+                        {/* 🌟 Add New Trade Button */}
+                        <button
+                            onClick={() => setIsAddModalOpen(true)}
+                            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-md shadow-emerald-500/20 active:scale-95"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+                            </svg>
+                            <span>Add Trade</span>
+                        </button>
+
                         <div className={`hidden xl:flex items-center space-x-2.5 px-3.5 py-1.5 rounded-full border text-xs font-semibold shadow-inner ${isDark ? 'bg-[#0E1526]/80 border-white/10' : 'bg-gray-100/80 border-gray-200'}`}>
                             <span className="relative flex h-2 w-2">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#3874FF] opacity-75"></span>
@@ -1088,8 +1344,8 @@ ${languageInstruction} Structure it as follows:
                         <button
                             onClick={toggleTheme}
                             className={`w-9 h-9 rounded-xl border transition-all duration-200 flex items-center justify-center text-sm shadow-sm ${isDark
-                                    ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-amber-400'
-                                    : 'bg-white hover:bg-gray-50 border-gray-200 text-slate-700'
+                                ? 'bg-[#0E1526] hover:bg-[#152038] border-white/10 text-amber-400'
+                                : 'bg-white hover:bg-gray-50 border-gray-200 text-slate-700'
                                 }`}
                             title="Toggle Theme"
                         >
@@ -1365,20 +1621,20 @@ ${languageInstruction} Structure it as follows:
 
                         <div className="flex items-center gap-3 flex-wrap">
                             <div className={`flex items-center p-1 rounded-xl border ${isDark ? 'bg-[#131926] border-[#1E2638]' : 'bg-gray-100 border-gray-200'}`}>
-                                <button 
+                                <button
                                     onClick={() => {
                                         setReportMode('month');
                                         setCustomStartDate('');
                                         setCustomEndDate('');
-                                    }} 
+                                    }}
                                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${reportMode === 'month' ? 'bg-[#3874FF] text-white shadow-md' : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
                                 >
                                     Monthly Mode
                                 </button>
-                                <button 
+                                <button
                                     onClick={() => {
                                         setReportMode('custom');
-                                    }} 
+                                    }}
                                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${reportMode === 'custom' ? 'bg-[#3874FF] text-white shadow-md' : isDark ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
                                 >
                                     Custom Date Range
@@ -1387,8 +1643,8 @@ ${languageInstruction} Structure it as follows:
 
                             {reportMode === 'month' ? (
                                 <div className="flex items-center gap-2">
-                                    <select 
-                                        value={calMonth} 
+                                    <select
+                                        value={calMonth}
                                         onChange={(e) => setCalMonth(parseInt(e.target.value))}
                                         className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#131926] border-[#1E2638] text-gray-200' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
                                     >
@@ -1397,8 +1653,8 @@ ${languageInstruction} Structure it as follows:
                                         ))}
                                     </select>
 
-                                    <select 
-                                        value={calYear} 
+                                    <select
+                                        value={calYear}
                                         onChange={(e) => setCalYear(parseInt(e.target.value))}
                                         className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#131926] border-[#1E2638] text-gray-200' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
                                     >
@@ -1411,26 +1667,30 @@ ${languageInstruction} Structure it as follows:
                                 <div className="flex items-center gap-2">
                                     <div className="flex flex-col">
                                         <span className={`text-[9px] font-bold uppercase ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>From Date</span>
-                                        <input 
-                                            type="date" 
-                                            value={customStartDate} 
+                                        <input
+                                            type="date"
+                                            value={customStartDate}
                                             onChange={(e) => setCustomStartDate(e.target.value)}
+                                            onClick={(e) => { try { e.currentTarget.showPicker?.(); } catch (_) { } }}
+                                            style={{ cursor: 'pointer' }}
                                             className={`py-1.5 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#131926] border-[#1E2638] text-gray-200' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
                                         />
                                     </div>
                                     <div className="flex flex-col">
                                         <span className={`text-[9px] font-bold uppercase ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>To Date</span>
-                                        <input 
-                                            type="date" 
-                                            value={customEndDate} 
+                                        <input
+                                            type="date"
+                                            value={customEndDate}
                                             onChange={(e) => setCustomEndDate(e.target.value)}
+                                            onClick={(e) => { try { e.currentTarget.showPicker?.(); } catch (_) { } }}
+                                            style={{ cursor: 'pointer' }}
                                             className={`py-1.5 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#131926] border-[#1E2638] text-gray-200' : 'bg-gray-50 border-gray-200 text-gray-800'}`}
                                         />
                                     </div>
                                 </div>
                             )}
 
-                            <button 
+                            <button
                                 onClick={exportCustomPDFReport}
                                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white transition text-xs font-bold shadow-md shadow-emerald-500/20 active:scale-95"
                                 title="Export filtered trades and charts as a professional PDF report"
@@ -1464,16 +1724,15 @@ ${languageInstruction} Structure it as follows:
                             const isProfitable = hasTrades && dayTotalPnL >= 0;
 
                             return (
-                                <div 
+                                <div
                                     key={`day-${dayNum}`}
                                     onClick={() => handleCalendarDateClick(dateKey)}
-                                    className={`h-24 p-3 rounded-2xl border flex flex-col justify-between transition-all duration-200 ${
-                                        hasTrades 
-                                            ? isProfitable 
-                                                ? 'bg-emerald-500/10 border-emerald-500/30 hover:border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.1)] cursor-pointer transform hover:scale-[1.02]' 
+                                    className={`h-24 p-3 rounded-2xl border flex flex-col justify-between transition-all duration-200 ${hasTrades
+                                            ? isProfitable
+                                                ? 'bg-emerald-500/10 border-emerald-500/30 hover:border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.1)] cursor-pointer transform hover:scale-[1.02]'
                                                 : 'bg-rose-500/10 border-rose-500/30 hover:border-rose-400 shadow-[0_0_15px_rgba(239,68,68,0.1)] cursor-pointer transform hover:scale-[1.02]'
                                             : isDark ? 'bg-[#131926]/70 border-[#1E2638] text-gray-500' : 'bg-gray-50 border-gray-200 text-gray-400'
-                                    }`}
+                                        }`}
                                     title={hasTrades ? "Click to view trades for this date" : ""}
                                 >
                                     <div className="flex items-center justify-between">
@@ -1501,11 +1760,338 @@ ${languageInstruction} Structure it as follows:
                 </section>
             </main>
 
+            
+{/* 🌟 FULL ADVANCED ADD TRADE MODAL */}
+            {isAddModalOpen && (
+                <div onClick={() => closeAddModal()} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto">
+                    <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-3xl border max-w-2xl w-full relative shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto ${isDark ? 'bg-[#0D111A] border-white/15 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`}>
+                        <div className="flex items-center justify-between border-b pb-4 border-gray-700/40">
+                            <h3 className="text-lg font-black flex items-center gap-2 text-emerald-400">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+                                </svg>
+                                Add Trade to Notion ({activeDatabase.toUpperCase()})
+                            </h3>
+                            <button onClick={() => closeAddModal()} className="w-9 h-9 rounded-xl bg-gray-800/60 hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 border border-white/10 transition flex items-center justify-center font-bold text-sm">
+                                ✕
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveNewTrade} noValidate className="space-y-4 text-xs">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">DATE</label>
+                                    <input 
+                                        type="date" 
+                                        required
+                                        value={newTradeForm.date} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, date: e.target.value})}
+                                        onClick={(e) => { try { e.currentTarget.showPicker?.(); } catch (_) { } }}
+                                        style={{ cursor: 'pointer' }}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">PAIR & DIRECTION</label>
+                                    <select 
+                                        value={newTradeForm.pairDirection} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, pairDirection: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    >
+                                        <option value="GBP/USD - SELL">GBP/USD - SELL</option>
+                                        <option value="GBP/USD - BUY">GBP/USD - BUY</option>
+                                        <option value="EUR/USD - SELL">EUR/USD - SELL</option>
+                                        <option value="EUR/USD - BUY">EUR/USD - BUY</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-3">
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">SESSION & TIME</label>
+                                    <select 
+                                        value={newTradeForm.session} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, session: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    >
+                                        <option value="LN SILVER BULLET">LN SILVER BULLET</option>
+                                        <option value="NY SILVER BULLET">NY SILVER BULLET</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">15 FVG TAP</label>
+                                    <select 
+                                        value={newTradeForm.fvgTap} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, fvgTap: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    >
+                                        <option value="YES">YES</option>
+                                        <option value="NO">NO</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">OUTCOME</label>
+                                    <select 
+                                        value={newTradeForm.outcome} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, outcome: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    >
+                                        <option value="Win">Win</option>
+                                        <option value="Loss">Loss</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block font-bold mb-1 text-gray-400">SMT DIVERGENCE</label>
+                                <select 
+                                    value={newTradeForm.smtDivergence} 
+                                    onChange={(e) => setNewTradeForm({...newTradeForm, smtDivergence: e.target.value})}
+                                    className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                >
+                                    <option value="NO SMT">NO SMT</option>
+                                    <option value="YES (GU HH & EU LH)">YES (GU HH & EU LH)</option>
+                                    <option value="YES (GU LH & EU HH)">YES (GU LH & EU HH)</option>
+                                    <option value="YES (GU HL & EU LL)">YES (GU HL & EU LL)</option>
+                                    <option value="YES (GU LL & EU HL)">YES (GU LL & EU HL)</option>
+                                </select>
+                            </div>
+
+                            {/* Execution Rules Checkboxes (Auto-calculates Setup Score in Notion via Formula) */}
+                            <div>
+                                <label className="block font-bold mb-1 text-gray-400">EXECUTION RULES (Select to calculate Setup Score)</label>
+                                <div className={`p-3 rounded-xl border grid grid-cols-1 sm:grid-cols-2 gap-2 ${isDark ? 'bg-[#131926] border-[#1E2638]' : 'bg-gray-50 border-gray-200'}`}>
+                                    {[
+                                        '1min MSS & FVG Entry',
+                                        'SMT Divergence',
+                                        'HTF Context (15min FVG)',
+                                        'Time Filter',
+                                        'Daily Bias Alignment'
+                                    ].map(rule => (
+                                        <label key={rule} className="flex items-center gap-2 cursor-pointer font-semibold">
+                                            <input 
+                                                type="checkbox"
+                                                checked={newTradeForm.executionRules.includes(rule)}
+                                                onChange={(e) => {
+                                                    const updated = e.target.checked 
+                                                        ? [...newTradeForm.executionRules, rule]
+                                                        : newTradeForm.executionRules.filter(r => r !== rule);
+                                                    setNewTradeForm({...newTradeForm, executionRules: updated});
+                                                }}
+                                                className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                                            />
+                                            <span>{rule}</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-3">
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">ENTRY PRICE <span className="text-rose-400">*</span></label>
+                                    <input 
+                                        type="number" 
+                                        step="0.00001"
+                                        placeholder="1.27450"
+                                        value={newTradeForm.entryPrice} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, entryPrice: e.target.value})}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, entryPrice: formatPrice5(prev.entryPrice) }))}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">SL PRICE <span className="text-rose-400">*</span></label>
+                                    <input 
+                                        type="number" 
+                                        step="0.00001"
+                                        placeholder="1.27600"
+                                        value={newTradeForm.slPrice} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, slPrice: e.target.value})}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, slPrice: formatPrice5(prev.slPrice) }))}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">LOT SIZE & RISK</label>
+                                    <input 
+                                        type="text" 
+                                        placeholder="1.0"
+                                        value={newTradeForm.lotSizeRisk} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, lotSizeRisk: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-3">
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">PLANE TARGET</label>
+                                    <input 
+                                        type="text" 
+                                        placeholder="1:2 (0p : 0p)"
+                                        value={newTradeForm.planeTarget} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, planeTarget: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">PROFIT AMOUNT ($)</label>
+                                    <input 
+                                        type="number" 
+                                        step="0.01"
+                                        placeholder="150"
+                                        value={newTradeForm.profitAmount} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, profitAmount: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">LOSS AMOUNT ($)</label>
+                                    <input 
+                                        type="number" 
+                                        step="0.01"
+                                        placeholder="0"
+                                        value={newTradeForm.lossAmount} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, lossAmount: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Psychological State */}
+                            <div>
+                                <label className="block font-bold mb-1 text-gray-400">PSYCHOLOGICAL STATE</label>
+                                <div className={`p-3 rounded-xl border grid grid-cols-3 gap-2 ${isDark ? 'bg-[#131926] border-[#1E2638]' : 'bg-gray-50 border-gray-200'}`}>
+                                    {['CALM', 'PATIENT', 'FOMO', 'HESITANT', 'ANGREE', 'MOOD'].map(state => (
+                                        <label key={state} className="flex items-center gap-2 cursor-pointer font-semibold">
+                                            <input 
+                                                type="checkbox"
+                                                checked={newTradeForm.psychologicalState.includes(state)}
+                                                onChange={(e) => {
+                                                    const updated = e.target.checked 
+                                                        ? [...newTradeForm.psychologicalState, state]
+                                                        : newTradeForm.psychologicalState.filter(s => s !== state);
+                                                    setNewTradeForm({...newTradeForm, psychologicalState: updated});
+                                                }}
+                                                className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500"
+                                            />
+                                            <span>{state}</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Multi-Image URLs for Before & After Charts */}
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">BEFORE CHART LINKS (one or more, comma separated)</label>
+                                    <input 
+                                        type="text"
+                                        placeholder="https://imgur.com/img1.png, https://imgur.com/img2.png"
+                                        value={newTradeForm.beforeCharts} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, beforeCharts: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-gray-400">AFTER CHART LINKS (one or more, comma separated)</label>
+                                    <input 
+                                        type="text"
+                                        placeholder="https://imgur.com/img1.png, https://imgur.com/img2.png"
+                                        value={newTradeForm.afterCharts} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, afterCharts: e.target.value})}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Direct image file uploads from computer (multiple images allowed) */}
+                            <div className="grid grid-cols-2 gap-4">
+                                {[
+                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#3874FF]' },
+                                    { id: 'after', label: 'AFTER CHART (Upload Images)', field: 'afterChartFiles', btn: 'file:bg-purple-600' }
+                                ].map(({ id, label, field, btn }) => (
+                                    <div key={id}>
+                                        <label className="block font-bold mb-1 text-gray-400">
+                                            {label} {newTradeForm[field].length > 0 && <span className="text-emerald-400">({newTradeForm[field].length})</span>}
+                                        </label>
+                                        <input
+                                            key={`${id}-file-${formKey}`}
+                                            type="file"
+                                            accept="image/*"
+                                            multiple
+                                            onChange={(e) => {
+                                                const picked = Array.from(e.target.files || []);
+                                                if (picked.length > 0) {
+                                                    setNewTradeForm(prev => ({ ...prev, [field]: [...prev[field], ...picked].slice(0, MAX_IMAGES_PER_CHART) }));
+                                                }
+                                                e.target.value = ''; // lets you pick more images (or the same one) again
+                                            }}
+                                            className={`w-full p-2.5 rounded-xl border font-bold file:mr-3 file:px-3 file:py-1 file:rounded-lg file:border-0 ${btn} file:text-white file:text-xs file:font-bold file:cursor-pointer ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                        />
+                                        {newTradeForm[field].length > 0 && (
+                                            <ul className="mt-2 space-y-1">
+                                                {newTradeForm[field].map((file, i) => (
+                                                    <li key={`${file.name}-${i}`} className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold ${isDark ? 'bg-[#131926] border-[#1E2638] text-emerald-400' : 'bg-gray-50 border-gray-200 text-emerald-600'}`}>
+                                                        <span className="truncate">✓ {file.name}</span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setNewTradeForm(prev => ({ ...prev, [field]: prev[field].filter((_, idx) => idx !== i) }))}
+                                                            className="text-gray-400 hover:text-rose-400 font-bold"
+                                                            title="Remove this image"
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                        <p className="mt-1 text-[10px] text-gray-500">You can add up to {MAX_IMAGES_PER_CHART} images (select several at once, or pick again to add more).</p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <p className="text-[11px] font-semibold text-rose-400">
+                                * Required: Entry Price, SL Price, and a Before + After chart image (upload a file or paste a link for each).
+                            </p>
+
+                            <div>
+                                <label className="block font-bold mb-1 text-gray-400">LESSON / MISTAKE (Note)</label>
+                                <textarea 
+                                    rows="2"
+                                    value={newTradeForm.note} 
+                                    onChange={(e) => setNewTradeForm({...newTradeForm, note: e.target.value})}
+                                    placeholder="Write your execution review or mistakes here..."
+                                    className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#131926] border-[#1E2638] text-white' : 'bg-gray-50 border-gray-200'}`}
+                                ></textarea>
+                            </div>
+
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button 
+                                    type="button" 
+                                    onClick={() => closeAddModal()} 
+                                    className="px-4 py-2 rounded-xl bg-gray-800 text-gray-300 font-bold hover:bg-gray-700 transition"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    type="submit" 
+                                    disabled={isSubmittingTrade}
+                                    className="px-6 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition shadow-md shadow-emerald-500/20"
+                                >
+                                    {isSubmittingTrade ? 'Saving to Notion...' : 'Save Trade to Notion'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
             {/* Calendar Date Click Trades Modal */}
             {isDateModalOpen && (
                 <div onClick={() => setIsDateModalOpen(false)} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
                     <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-3xl border max-w-6xl w-full relative shadow-2xl space-y-6 max-h-[85vh] overflow-y-auto ${isDark ? 'bg-[#0D111A] border-white/15 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`}>
-                        
+
                         <div className="flex items-center justify-between border-b pb-4 border-gray-700/40">
                             <div>
                                 <h3 className="text-lg font-black flex items-center gap-2.5 text-amber-400">
@@ -1539,8 +2125,8 @@ ${languageInstruction} Structure it as follows:
                                     {selectedDateTrades.map((trade) => {
                                         const isWin = trade.result === 'Win';
                                         return (
-                                            <tr 
-                                                key={trade.id} 
+                                            <tr
+                                                key={trade.id}
                                                 onClick={() => { setSelectedTrade(trade); setIsDetailsOpen(true); }}
                                                 className={`transition cursor-pointer ${isDark ? 'hover:bg-[#151D2F]' : 'hover:bg-blue-50/50'}`}
                                                 title="Click anywhere on this row to view full trade details & charts"
@@ -1582,7 +2168,7 @@ ${languageInstruction} Structure it as follows:
             {isAiOpen && (
                 <div onClick={() => setIsAiOpen(false)} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
                     <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-3xl border max-w-3xl w-full relative shadow-2xl space-y-6 max-h-[85vh] overflow-y-auto ${isDark ? 'bg-[#0D111A] border-white/15 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`}>
-                        
+
                         <div className="flex items-center justify-between border-b pb-4 border-gray-700/40">
                             <h3 className="text-lg font-black flex items-center gap-2.5 text-purple-400">
                                 <div className="p-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400">
@@ -1601,8 +2187,8 @@ ${languageInstruction} Structure it as follows:
                             <div className="flex items-center gap-3 w-full sm:w-auto flex-wrap">
                                 <div className="flex flex-col gap-1">
                                     <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Timeframe</span>
-                                    <select 
-                                        value={aiTimeframe} 
+                                    <select
+                                        value={aiTimeframe}
                                         onChange={(e) => setAiTimeframe(e.target.value)}
                                         className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#0D111A] border-purple-500/30 text-purple-300' : 'bg-white border-purple-300 text-purple-700'}`}
                                     >
@@ -1616,8 +2202,8 @@ ${languageInstruction} Structure it as follows:
 
                                 <div className="flex flex-col gap-1">
                                     <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Language</span>
-                                    <select 
-                                        value={aiLang} 
+                                    <select
+                                        value={aiLang}
                                         onChange={(e) => setAiLang(e.target.value)}
                                         className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#0D111A] border-purple-500/30 text-purple-300' : 'bg-white border-purple-300 text-purple-700'}`}
                                     >
@@ -1627,7 +2213,7 @@ ${languageInstruction} Structure it as follows:
                                 </div>
                             </div>
 
-                            <button 
+                            <button
                                 onClick={generateAiReport}
                                 className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-xs font-bold hover:opacity-90 transition shadow-md shadow-purple-500/20 active:scale-95 flex items-center justify-center gap-2"
                             >
@@ -1718,7 +2304,7 @@ ${languageInstruction} Structure it as follows:
             {isDetailsOpen && selectedTrade && (
                 <div onClick={() => setIsDetailsOpen(false)} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
                     <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-3xl border max-w-3xl w-full relative shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto ${isDark ? 'bg-[#0D111A] border-white/15 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`}>
-                        
+
                         <div className="flex items-center justify-between border-b pb-4 border-gray-700/40">
                             <div className="flex items-center gap-3">
                                 <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-black border ${selectedTrade.result === 'Win' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-rose-500/10 border-rose-500/30 text-rose-400'}`}>
@@ -1726,7 +2312,7 @@ ${languageInstruction} Structure it as follows:
                                 </div>
                                 <div>
                                     <h2 className="text-xl font-black tracking-tight flex items-center gap-2">
-                                        {selectedTrade.pair} 
+                                        {selectedTrade.pair}
                                         <span className={`text-xs px-2.5 py-0.5 rounded-lg border font-bold uppercase ${selectedTrade.direction === 'LONG' ? 'bg-blue-500/10 text-[#3874FF] border-blue-500/30' : 'bg-purple-500/10 text-purple-400 border-purple-500/30'}`}>
                                             {selectedTrade.direction}
                                         </span>
@@ -1799,14 +2385,14 @@ ${languageInstruction} Structure it as follows:
                                         return (
                                             <>
                                                 {selectedTrade.beforeCharts.map((url, i) => (
-                                                    <div 
-                                                        key={`before-${i}`} 
-                                                        className="relative rounded-2xl overflow-hidden border border-white/10 group cursor-pointer" 
-                                                        onClick={() => { 
-                                                            setActiveItems(combinedCharts); 
-                                                            setActiveImgIndex(i); 
-                                                            setModalTitle(`${selectedTrade.pair} - Execution Gallery`); 
-                                                            setIsChartOpen(true); 
+                                                    <div
+                                                        key={`before-${i}`}
+                                                        className="relative rounded-2xl overflow-hidden border border-white/10 group cursor-pointer"
+                                                        onClick={() => {
+                                                            setActiveItems(combinedCharts);
+                                                            setActiveImgIndex(i);
+                                                            setModalTitle(`${selectedTrade.pair} - Execution Gallery`);
+                                                            setIsChartOpen(true);
                                                         }}
                                                     >
                                                         <img src={url} alt="Before Chart" className="w-full h-36 object-cover group-hover:scale-105 transition duration-300" />
@@ -1815,14 +2401,14 @@ ${languageInstruction} Structure it as follows:
                                                 ))}
 
                                                 {selectedTrade.afterCharts.map((url, i) => (
-                                                    <div 
-                                                        key={`after-${i}`} 
-                                                        className="relative rounded-2xl overflow-hidden border border-white/10 group cursor-pointer" 
-                                                        onClick={() => { 
-                                                            setActiveItems(combinedCharts); 
-                                                            setActiveImgIndex(selectedTrade.beforeCharts.length + i); 
-                                                            setModalTitle(`${selectedTrade.pair} - Execution Gallery`); 
-                                                            setIsChartOpen(true); 
+                                                    <div
+                                                        key={`after-${i}`}
+                                                        className="relative rounded-2xl overflow-hidden border border-white/10 group cursor-pointer"
+                                                        onClick={() => {
+                                                            setActiveItems(combinedCharts);
+                                                            setActiveImgIndex(selectedTrade.beforeCharts.length + i);
+                                                            setModalTitle(`${selectedTrade.pair} - Execution Gallery`);
+                                                            setIsChartOpen(true);
                                                         }}
                                                     >
                                                         <img src={url} alt="After Chart" className="w-full h-36 object-cover group-hover:scale-105 transition duration-300" />
@@ -1859,8 +2445,8 @@ ${languageInstruction} Structure it as follows:
                                     {modalTitle}
                                 </h3>
                                 <span className={`text-[11px] px-3 py-1 rounded-full font-extrabold uppercase tracking-wider border ${activeItems[activeImgIndex].type.includes('Before')
-                                        ? 'bg-blue-500/10 text-[#3874FF] border-blue-500/30'
-                                        : 'bg-purple-500/10 text-purple-400 border-purple-500/30'
+                                    ? 'bg-blue-500/10 text-[#3874FF] border-blue-500/30'
+                                    : 'bg-purple-500/10 text-purple-400 border-purple-500/30'
                                     }`}>
                                     {activeItems[activeImgIndex].type}
                                 </span>
@@ -1898,8 +2484,8 @@ ${languageInstruction} Structure it as follows:
                                             key={idx}
                                             onClick={() => setActiveImgIndex(idx)}
                                             className={`px-3 py-1 rounded-xl border font-medium transition whitespace-nowrap ${activeImgIndex === idx
-                                                    ? 'bg-[#3874FF] text-white border-[#3874FF]'
-                                                    : isDark ? 'bg-[#131926] text-gray-400 border-[#1E2638] hover:text-white' : 'bg-gray-100 text-gray-600 border-gray-200 hover:text-gray-900'
+                                                ? 'bg-[#3874FF] text-white border-[#3874FF]'
+                                                : isDark ? 'bg-[#131926] text-gray-400 border-[#1E2638] hover:text-white' : 'bg-gray-100 text-gray-600 border-gray-200 hover:text-gray-900'
                                                 }`}
                                         >
                                             {item.type}
@@ -1913,14 +2499,14 @@ ${languageInstruction} Structure it as follows:
                         <div className={`relative flex-1 overflow-auto flex items-center justify-center rounded-2xl p-2 min-h-[450px] ${isDark ? 'bg-black/60' : 'bg-gray-100'}`}>
                             {activeItems.length > 1 && (
                                 <>
-                                    <button 
+                                    <button
                                         onClick={() => setActiveImgIndex(prev => (prev === 0 ? activeItems.length - 1 : prev - 1))}
                                         className="absolute left-3 top-1/2 -translate-y-1/2 p-3 rounded-full bg-black/50 hover:bg-black/80 text-white transition backdrop-blur-md border border-white/20 shadow-lg"
                                         title="Previous Image (Left Arrow)"
                                     >
                                         ◀
                                     </button>
-                                    <button 
+                                    <button
                                         onClick={() => setActiveImgIndex(prev => (prev === activeItems.length - 1 ? 0 : prev + 1))}
                                         className="absolute right-3 top-1/2 -translate-y-1/2 p-3 rounded-full bg-black/50 hover:bg-black/80 text-white transition backdrop-blur-md border border-white/20 shadow-lg"
                                         title="Next Image (Right Arrow)"

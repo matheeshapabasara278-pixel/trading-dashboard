@@ -212,6 +212,116 @@ app.post('/api/notion/add', (req, res, next) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// ✏️ Edit / 🗑️ Delete trade helpers
+// ---------------------------------------------------------------------------
+const normalizeId = (id) => String(id || '').replace(/-/g, '').toLowerCase();
+
+// Makes sure the page really belongs to one of YOUR trade databases before it is changed
+async function assertTradePage(pageId) {
+  if (!/^[0-9a-f-]{32,36}$/i.test(String(pageId || ''))) {
+    const err = new Error('Invalid trade id.');
+    err.status = 400;
+    throw err;
+  }
+  const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    headers: { 'Authorization': `Bearer ${getNotionKey()}`, 'Notion-Version': NOTION_VERSION }
+  });
+  const page = await res.json();
+  if (!res.ok) {
+    const err = new Error(page.message || 'Trade not found in Notion.');
+    err.status = res.status === 404 ? 404 : 502;
+    throw err;
+  }
+  const allowed = [process.env.NOTION_LIVE_DATABASE_ID, process.env.NOTION_BACKTEST_DATABASE_ID].filter(Boolean).map(normalizeId);
+  if (!allowed.includes(normalizeId(page.parent?.database_id))) {
+    const err = new Error('This page is not part of your trade databases.');
+    err.status = 403;
+    throw err;
+  }
+  return page;
+}
+
+// ✏️ Update an existing trade (text fields only: images stay exactly as they are in Notion)
+app.patch('/api/notion/update/:pageId', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    await assertTradePage(pageId);
+
+    const b = req.body || {};
+    const parseArr = (v) => {
+      if (Array.isArray(v)) return v;
+      try { return JSON.parse(v || '[]'); } catch (e) { return []; }
+    };
+    const num = (v, digits) => {
+      if (v === undefined) return undefined;
+      if (v === '' || v === null) return { number: null }; // empty -> clears the number in Notion
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? { number: digits ? Number(n.toFixed(digits)) : n } : { number: null };
+    };
+
+    const properties = {};
+    if (b.date) properties["DATE"] = { date: { start: b.date } };
+    if (b.pairDirection) properties["PAIR & DIRECTION"] = { select: { name: b.pairDirection } };
+    if (b.session) properties["SESSION & TIME"] = { select: { name: b.session } };
+    if (b.fvgTap) properties["15 FVG TAP"] = { select: { name: b.fvgTap } };
+    if (b.smtDivergence) properties["SMT DIVERGENCE"] = { select: { name: b.smtDivergence } };
+    if (b.outcome) properties["OUTCOME"] = { select: { name: b.outcome } };
+    if (b.executionRules !== undefined) properties["EXECUTION RULES"] = { multi_select: parseArr(b.executionRules).map(name => ({ name })) };
+    if (b.psychologicalState !== undefined) properties["PSYCHOLOGICAL STATE"] = { multi_select: parseArr(b.psychologicalState).map(name => ({ name })) };
+    if (b.note !== undefined) properties["LESSON / MISTALKE"] = { rich_text: [{ text: { content: String(b.note || '') } }] };
+    if (b.planeTarget !== undefined) properties["PLANE TARGET (RR & PIPS)"] = { rich_text: [{ text: { content: String(b.planeTarget || '') } }] };
+
+    const entry = num(b.entryPrice, 5); if (entry) properties["ENTRY PRICE"] = entry;
+    const sl = num(b.slPrice, 5); if (sl) properties["SL PRICE"] = sl;
+    const lot = num(b.lotSizeRisk); if (lot) properties["LOT SIZE & RISK"] = lot;
+    const profit = num(b.profitAmount); if (profit) properties["PROFITE AMOUNT"] = profit;
+    const loss = num(b.lossAmount); if (loss) properties["LOSS AMOUNT"] = loss;
+
+    const notionResponse = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${getNotionKey()}`,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ properties })
+    });
+    const result = await notionResponse.json();
+    if (!notionResponse.ok) throw new Error(result.message || 'Failed to update trade in Notion');
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error("Notion Update Error:", error.message);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// 🗑️ Delete a trade (Notion "archive": it can still be restored from Notion's Trash for 30 days)
+app.delete('/api/notion/delete/:pageId', async (req, res) => {
+  try {
+    const { pageId } = req.params;
+    await assertTradePage(pageId);
+
+    const notionResponse = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${getNotionKey()}`,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ archived: true })
+    });
+    const result = await notionResponse.json();
+    if (!notionResponse.ok) throw new Error(result.message || 'Failed to delete trade in Notion');
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Notion Delete Error:", error.message);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
 // Netlify function fallback redirect
 app.get('/.netlify/functions/notion', (req, res) => {
   res.redirect('/api/notion');

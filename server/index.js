@@ -318,7 +318,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ success: false, error: err.message || 'Internal server error' });
 });
 
-// Local Development Server Listener
+// Local Development Server Listener & Serverless Export
 if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
   connectDB().catch((err) => console.error('Initial MongoDB connection failed:', err.message));
   app.listen(PORT, () => {
@@ -326,4 +326,5 @@ if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
   });
 }
 
+// Netlify Serverless Functions සඳහා Express app එක export කිරීම අනිවාර්යයි
 module.exports = app;

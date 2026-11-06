@@ -265,6 +265,9 @@ function DrawdownChart({ series, isDark }) {
 // ---------------------------------------------------------------------------
 // UI helpers: icons, count-up numbers, loading splash
 // ---------------------------------------------------------------------------
+// Backend base URL: leave empty to use the Vite proxy, or set VITE_API_URL for a deployed API
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
+
 const ICONS = {
     edit: 'M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z',
     trash: 'M3 6h18M8 6V4h8v2m-9 0l1 14h8l1-14M10 11v6M14 11v6',
@@ -327,10 +330,10 @@ export default function App() {
     const [isDark, setIsDark] = useState(true);
     const [killzoneStatus, setKillzoneStatus] = useState("Checking Sri Lanka Killzone...");
     const [killzoneColor, setKillzoneColor] = useState("text-slate-400");
-    const [syncStatus, setSyncStatus] = useState({ text: "Fetching Notion...", dot: "bg-emerald-400", pulse: true });
+    const [syncStatus, setSyncStatus] = useState({ text: "Connecting to MongoDB...", dot: "bg-emerald-400", pulse: true });
 
-    // Notion Success Notification Toast State (Top position)
-    const [notionToast, setNotionToast] = useState({ show: false, message: "", type: "success" });
+    // Success / error notification toast state (Top position)
+    const [appToast, setAppToast] = useState({ show: false, message: "", type: "success" });
 
     // 🌟 Advanced Add Trade Modal States
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -371,6 +374,7 @@ export default function App() {
 
     // KPIs & Advanced Metrics
     const [kpiNetProfit, setKpiNetProfit] = useState("$0.00");
+    const netNeg = String(kpiNetProfit).startsWith('-'); // red when the net PnL is negative, green otherwise
     const [kpiRMultiple, setKpiRMultiple] = useState("+0.0 R");
     const [kpiWinRate, setKpiWinRate] = useState("0%");
     const [kpiWinLossRatio, setKpiWinLossRatio] = useState("0W / 0L");
@@ -427,7 +431,7 @@ export default function App() {
     const [settingsDraft, setSettingsDraft] = useState(DEFAULT_SETTINGS);
     const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
     const [syncFailed, setSyncFailed] = useState(false);
-    const fetchNotionRef = useRef(null);
+    const fetchTradesRef = useRef(null);
 
     const startBal = toNum(settings.startingBalance);
     const analytics = useMemo(() => computeAnalytics(trades, startBal), [trades, startBal]);
@@ -511,9 +515,9 @@ export default function App() {
     };
 
     const showToast = (message, type = 'success') => {
-        setNotionToast({ show: true, message, type });
+        setAppToast({ show: true, message, type });
         setTimeout(() => {
-            setNotionToast(prev => ({ ...prev, show: false }));
+            setAppToast(prev => ({ ...prev, show: false }));
         }, 3500);
     };
 
@@ -607,11 +611,11 @@ export default function App() {
         setCalYear(new Date().getFullYear());
 
         lastDataSigRef.current = null; // force a fresh parse when switching database
-        fetchNotionData();
+        fetchTrades();
 
         // 🔄 Live sync: poll every 5s (only while the tab is visible) + refresh instantly when the tab regains focus
         const silentRefresh = () => {
-            if (!document.hidden) fetchNotionData(true);
+            if (!document.hidden) fetchTrades(true);
         };
 
         const autoRefreshInterval = setInterval(silentRefresh, 5000);
@@ -647,7 +651,7 @@ export default function App() {
 
     // 📶 Online / offline detection + PWA service worker
     useEffect(() => {
-        const goOnline = () => { setIsOnline(true); if (fetchNotionRef.current) fetchNotionRef.current(true); };
+        const goOnline = () => { setIsOnline(true); if (fetchTradesRef.current) fetchTradesRef.current(true); };
         const goOffline = () => setIsOnline(false);
         window.addEventListener('online', goOnline);
         window.addEventListener('offline', goOffline);
@@ -690,33 +694,34 @@ export default function App() {
         setActiveTab('overview');
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }, [activeDatabase]);
-    const fetchNotionData = async (isSilent = false) => {
-        try { await fetchNotionDataCore(isSilent); } finally { setDataReady(true); }
+    const fetchTrades = async (isSilent = false) => {
+        try { await fetchTradesCore(isSilent); } finally { setDataReady(true); }
     };
 
-    const fetchNotionDataCore = async (isSilent = false) => {
+    const fetchTradesCore = async (isSilent = false) => {
         if (!isSilent) {
-            setSyncStatus({ text: `Fetching ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion...`, dot: "bg-emerald-400", pulse: true });
+            setSyncStatus({ text: `Fetching ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} trades...`, dot: "bg-emerald-400", pulse: true });
         }
         const seq = ++fetchSeqRef.current; // ignore out-of-date responses (e.g. after switching database)
         try {
-            const response = await fetch(`/api/notion?type=${activeDatabase}`);
+            const response = await fetch(`${API_BASE}/api/trades?type=${activeDatabase}`);
             if (seq !== fetchSeqRef.current) return;
             if (response.ok) {
                 const fetchedData = await response.json();
+                const list = Array.isArray(fetchedData) ? fetchedData : (fetchedData && (fetchedData.trades || fetchedData.data || fetchedData.results));
                 if (seq !== fetchSeqRef.current) return;
-                if (fetchedData && fetchedData.results) {
-                    setSyncStatus({ text: `${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} Notion Connected`, dot: "bg-emerald-400", pulse: true });
+                if (Array.isArray(list)) {
+                    setSyncStatus({ text: `${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} MongoDB Connected`, dot: "bg-emerald-400", pulse: true });
                     setSyncFailed(false);
 
-                    // Only re-render when something really changed in Notion (signed file URLs change on every request, so they are ignored)
-                    const signature = JSON.stringify(fetchedData.results, (key, value) => (key === 'url' || key === 'expiry_time') ? undefined : value);
+                    // Only re-render when the data really changed (silent background polling)
+                    const signature = JSON.stringify(list);
                     const changed = !isSilent || signature !== lastDataSigRef.current;
                     lastDataSigRef.current = signature;
-                    if (changed) parseNotionData(fetchedData.results);
+                    if (changed) parseMongoData(list);
                     if (!isSilent) {
                         playSound('win');
-                        showToast(`Notion Connected Successfully! (${activeDatabase.toUpperCase()} Database synced)`, 'success');
+                        showToast(`MongoDB Connected Successfully! (${activeDatabase.toUpperCase()} Database synced)`, 'success');
                     }
                     return;
                 }
@@ -725,13 +730,13 @@ export default function App() {
 
         if (seq === fetchSeqRef.current) setSyncFailed(true);
         if (!isSilent) {
-            setSyncStatus({ text: "Notion Sync Error", dot: "bg-rose-500", pulse: false });
+            setSyncStatus({ text: "Database Sync Error", dot: "bg-rose-500", pulse: false });
             playSound('loss');
-            showToast(`❌ Notion Sync Failed! Please check API connection.`, 'error');
+            showToast(`❌ Database Sync Failed! Please check API connection.`, 'error');
         }
     };
 
-    fetchNotionRef.current = fetchNotionData;
+    fetchTradesRef.current = fetchTrades;
 
     // Reads a readable error message from a failed API response
     const readApiError = async (response) => {
@@ -776,20 +781,20 @@ export default function App() {
         setIsAddModalOpen(true);
     };
 
-    // 🗑️ Delete (archive) a trade in Notion
+    // 🗑️ Delete a trade from MongoDB
     const handleDeleteTrade = async () => {
         const t = confirmDelete.trade;
         if (!t || !t.pageId) return;
         setIsDeleting(true);
         try {
-            const response = await fetch(`/api/notion/delete/${t.pageId}`, { method: 'DELETE' });
+            const response = await fetch(`${API_BASE}/api/trades/${t.pageId}`, { method: 'DELETE' });
             if (response.ok) {
                 setConfirmDelete({ show: false, trade: null });
                 setIsDetailsOpen(false);
                 setIsDateModalOpen(false);
                 playSound('win');
-                showResultPopup('success', 'Trade Deleted', "The trade was moved to Notion's Trash (you can restore it there for 30 days).", [], 3500);
-                fetchNotionData(true);
+                showResultPopup('success', 'Trade Deleted', 'The trade and its screenshots were permanently removed from your database.', [], 3500);
+                fetchTrades(true);
             } else {
                 playSound('loss');
                 setConfirmDelete({ show: false, trade: null });
@@ -830,7 +835,7 @@ export default function App() {
         showToast('⚙️ Settings saved', 'success');
     };
 
-    // 🌟 Submit new trade to backend API to save in Notion
+    // 🌟 Submit new trade to the backend API (MongoDB + Cloudinary)
     const handleSaveNewTrade = async (e) => {
         e.preventDefault();
 
@@ -856,10 +861,10 @@ export default function App() {
 
         setIsSubmittingTrade(true);
 
-        // ✏️ Editing an existing trade: update the same Notion page (images are left untouched)
+        // ✏️ Editing an existing trade: update the same MongoDB document (images are left untouched)
         if (editingPageId) {
             try {
-                const response = await fetch(`/api/notion/update/${editingPageId}`, {
+                const response = await fetch(`${API_BASE}/api/trades/${editingPageId}`, {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -883,8 +888,8 @@ export default function App() {
                 if (response.ok) {
                     playSound('win');
                     closeAddModal();
-                    showResultPopup('success', 'Trade Updated!', 'Your changes were saved to Notion.', [], 3500);
-                    fetchNotionData(true);
+                    showResultPopup('success', 'Trade Updated!', 'Your changes were saved to MongoDB.', [], 3500);
+                    fetchTrades(true);
                 } else {
                     playSound('loss');
                     showResultPopup('error', 'Failed to update trade', await readApiError(response));
@@ -900,7 +905,8 @@ export default function App() {
 
         try {
             const formData = new FormData();
-            formData.append('databaseType', activeDatabase); // 'live' or 'backtest'
+            formData.append('type', activeDatabase); // 'live' or 'backtest'
+            formData.append('databaseType', activeDatabase);
 
             // Text fields
             formData.append('date', newTradeForm.date);
@@ -928,7 +934,7 @@ export default function App() {
             newTradeForm.afterChartFiles.forEach(file => formData.append('afterChart', file));
 
             // Do NOT set Content-Type manually: the browser adds the multipart boundary
-            const response = await fetch('/api/notion/add', {
+            const response = await fetch(`${API_BASE}/api/trades/add`, {
                 method: 'POST',
                 body: formData
             });
@@ -936,10 +942,10 @@ export default function App() {
             if (response.ok) {
                 playSound('win');
                 closeAddModal();
-                showResultPopup('success', 'Trade Saved!', `Your ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} trade was successfully saved to Notion.`, [], 3500);
+                showResultPopup('success', 'Trade Saved!', `Your ${activeDatabase === 'live' ? 'Forward Test' : 'Backtest'} trade was successfully saved to MongoDB (screenshots uploaded to Cloudinary).`, [], 3500);
 
 
-                fetchNotionData(true); // Refresh list immediately (silent, the popup already confirms the save)
+                fetchTrades(true); // Refresh list immediately (silent, the popup already confirms the save)
             } else {
                 let errMsg = `The server responded with status ${response.status}.`;
                 try {
@@ -972,94 +978,110 @@ export default function App() {
         }
     };
 
-    const parseNotionData = (results) => {
-        // Oldest -> newest (by DATE, then by the time it was added to Notion): newest trade is always last
-        const sortedResults = [...results].sort((a, b) => {
-            const dA = a.properties?.['DATE']?.date?.start || a.properties?.['Date']?.date?.start || '';
-            const dB = b.properties?.['DATE']?.date?.start || b.properties?.['Date']?.date?.start || '';
+    // Maps MongoDB documents (schema: _id, date, pairDirection, session, fvgTap, smtDivergence, executionRules,
+    // entryPrice, slPrice, planeTarget, lotSizeRisk, outcome, profitAmount, lossAmount, psychologicalState,
+    // screenshotUrl, note) into the trade objects the whole dashboard works with.
+    const parseMongoData = (docs) => {
+        const toArr = (v) => {
+            if (Array.isArray(v)) return v.filter(Boolean).map(String);
+            if (typeof v === 'string' && v.trim()) {
+                try { const p = JSON.parse(v); if (Array.isArray(p)) return p.map(String); } catch (_) { }
+                return v.split(',').map(s => s.trim()).filter(Boolean);
+            }
+            return [];
+        };
+        const toUrls = (v) => {
+            if (!v) return [];
+            if (Array.isArray(v)) return v.flatMap(toUrls);
+            if (typeof v === 'object') return toUrls(v.secure_url || v.url || v.src || '');
+            return String(v).split(/[\s,]+/).filter(u => /^https?:\/\//i.test(u));
+        };
+        const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+        // Cloudinary screenshots -> { before: [...], after: [...] }
+        const getShots = (d) => {
+            let before = toUrls(d.beforeCharts || d.beforeChart || d.beforeChartUrl);
+            let after = toUrls(d.afterCharts || d.afterChart || d.afterChartUrl);
+            const s = d.screenshotUrl;
+            if (s && typeof s === 'object' && !Array.isArray(s) && (s.before || s.after)) {
+                before = before.concat(toUrls(s.before));
+                after = after.concat(toUrls(s.after));
+            } else if (s) {
+                const rest = [];
+                toUrls(s).forEach(u => { if (/before/i.test(u)) before.push(u); else if (/after/i.test(u)) after.push(u); else rest.push(u); });
+                if (rest.length === 1) before.push(rest[0]);
+                else { const half = Math.ceil(rest.length / 2); before.push(...rest.slice(0, half)); after.push(...rest.slice(half)); }
+            }
+            return { before: [...new Set(before)], after: [...new Set(after)] };
+        };
+
+        // Oldest -> newest (by DATE, then by creation time): newest trade is always last
+        const sortedResults = [...docs].sort((a, b) => {
+            const dA = String(a.date || '').slice(0, 10);
+            const dB = String(b.date || '').slice(0, 10);
             if (dA !== dB) return dA < dB ? -1 : 1;
-            const cA = a.created_time || '';
-            const cB = b.created_time || '';
+            const cA = String(a.createdAt || '');
+            const cB = String(b.createdAt || '');
             if (cA !== cB) return cA < cB ? -1 : 1;
             return 0;
         });
 
         const parsedTrades = sortedResults.map((item, index) => {
-            const props = item.properties;
-            const dateStr = props['DATE']?.date?.start || props['Date']?.date?.start || 'N/A';
+            const dateStr = item.date ? String(item.date).slice(0, 10) : 'N/A';
 
             let dayOfWeek = 'N/A';
             let monthYearKey = 'N/A';
             if (dateStr !== 'N/A') {
-                const d = new Date(dateStr);
+                const d = new Date(`${dateStr}T00:00:00`);
                 if (!isNaN(d)) {
                     dayOfWeek = d.toLocaleDateString('en-US', { weekday: 'short' });
                     monthYearKey = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
                 }
             }
 
-            const pairDirectionTag = props['PAIR & DIRECTION']?.select?.name || props['PAIR / ASSET']?.select?.name || props['Pair']?.select?.name || 'GBP/USD - BUY';
+            const pairDirectionTag = item.pairDirection || 'GBP/USD - BUY';
             const pair = pairDirectionTag.includes('-') ? pairDirectionTag.split('-')[0].trim() : pairDirectionTag;
 
             let direction = 'LONG';
             const tagUpper = pairDirectionTag.toUpperCase();
             if (tagUpper.includes('SELL') || tagUpper.includes('SHORT')) direction = 'SHORT';
 
-            const rawSession = props['SESSION & TIME']?.select?.name || props['Session']?.select?.name || 'N/A';
-            const rr = props['PLANNED R:R']?.number || props['RR']?.number || 2.0;
+            const rawSession = item.session || 'N/A';
 
-            const setupScoreProp = props['SETUP SCORE'] || props['Setup Score'] || props['EXECUTION RULES'];
-            let setupScoreVal = 'N/A';
-            if (setupScoreProp) {
-                if (setupScoreProp.formula) setupScoreVal = setupScoreProp.formula.string || setupScoreProp.formula.number || 'N/A';
-                else if (setupScoreProp.select) setupScoreVal = setupScoreProp.select.name;
-                else if (setupScoreProp.rich_text) setupScoreVal = setupScoreProp.rich_text.map(t => t.plain_text).join('') || 'N/A';
-            }
-
-            const targetProp = props['PLANE TARGET (RR & PIPS)'] || props['SL / TP Pips'] || props['Target'];
+            // planeTarget looks like "1:2 (10p : 20p)"
+            const targetText = String(item.planeTarget || '');
+            const rrMatch = targetText.match(/^\s*1\s*:\s*(\d+(?:\.\d+)?)/);
+            const rr = rrMatch ? parseFloat(rrMatch[1]) : 2.0;
             let slPipsVal = '0';
             let tpPipsVal = '0';
-            if (targetProp) {
-                let targetText = targetProp.formula?.string || targetProp.rich_text?.map(t => t.plain_text).join('') || '';
-                const match = targetText.match(/\(([^)]+)\)/);
-                if (match && match[1]) {
-                    const pipsParts = match[1].split(':');
-                    if (pipsParts.length === 2) {
-                        slPipsVal = pipsParts[0].trim().replace(/p$/i, '');
-                        tpPipsVal = pipsParts[1].trim().replace(/p$/i, '');
-                    }
+            const match = targetText.match(/\(([^)]+)\)/);
+            if (match && match[1]) {
+                const pipsParts = match[1].split(':');
+                if (pipsParts.length === 2) {
+                    slPipsVal = pipsParts[0].trim().replace(/p$/i, '');
+                    tpPipsVal = pipsParts[1].trim().replace(/p$/i, '');
                 }
             }
 
-            const rulesArr = (props['EXECUTION RULES']?.multi_select || []).map(o => o.name);
-            const psychArr = (props['PSYCHOLOGICAL STATE']?.multi_select || []).map(o => o.name);
-            if (setupScoreVal === 'N/A' && rulesArr.length > 0) setupScoreVal = `${rulesArr.length}/5`;
-            const numProp = (k) => (typeof props[k]?.number === 'number' ? props[k].number : null);
+            const rulesArr = toArr(item.executionRules);
+            const psychArr = toArr(item.psychologicalState);
 
-            const profitAmt = props['PROFITE AMOUNT']?.number || props['Profit Amount']?.number || 0;
-            const lossAmt = props['LOSS AMOUNT']?.number || props['Loss Amount']?.number || 0;
-            const genericPnL = props['PROFIT/LOSS AMOUNT']?.number || props['PnL']?.number || 0;
+            // Setup score = rules followed out of 5
+            let setupScoreVal = 'N/A';
+            if (rulesArr.length > 0) {
+                const pct = Math.min(100, Math.round((rulesArr.length / 5) * 100));
+                const label = pct >= 80 ? '🟢' + ' ' + pct + '% (High Quality)' : pct >= 60 ? '🟡' + ' ' + pct + '% (Medium)' : '🔴' + ' ' + pct + '% (Low)';
+                setupScoreVal = label;
+            }
 
-            let pnl = genericPnL;
+            const profitAmt = Number(item.profitAmount) || 0;
+            const lossAmt = Number(item.lossAmount) || 0;
+            let pnl = 0;
             if (profitAmt > 0) pnl = profitAmt;
             else if (lossAmt > 0) pnl = -Math.abs(lossAmt);
 
-            const outcome = props['OUTCOME']?.select?.name || props['Outcome']?.select?.name || (pnl >= 0 ? 'Win' : 'Loss');
-
-            const beforeFiles = props['BEFORE CHART']?.files || props['Before Chart']?.files || props['Before Images']?.files || props['Before']?.files || [];
-            const afterFiles = props['AFTER CHART']?.files || props['After Chart']?.files || props['After Images']?.files || props['After']?.files || [];
-
-            const noteProp = props['LESSON / MISTALKE'] || props['Lesson / Mistalke'] || props['NOTE'] || props['Notes'] || props['NOTE / COMMENT'] || props['Comment'] || props['Description'];
-            let noteText = 'නෝට් එකක් නොමැත';
-            if (noteProp) {
-                if (noteProp.rich_text && noteProp.rich_text.length > 0) {
-                    noteText = noteProp.rich_text.map(t => t.plain_text).join('');
-                } else if (noteProp.title && noteProp.title.length > 0) {
-                    noteText = noteProp.title.map(t => t.plain_text).join('');
-                }
-            }
-
-            const rawNoteText = (noteProp?.rich_text || noteProp?.title || []).map(t => t.plain_text).join('');
+            const outcome = item.outcome || (pnl >= 0 ? 'Win' : 'Loss');
+            const rawNoteText = item.note ? String(item.note) : '';
+            const shots = getShots(item);
 
             let normalizedSession = rawSession;
             if (rawSession.toUpperCase().includes('LN') || rawSession.toUpperCase().includes('LONDON')) normalizedSession = 'London Session';
@@ -1067,20 +1089,20 @@ export default function App() {
 
             return {
                 id: index + 1,
-                pageId: item.id,
+                pageId: item._id, // MongoDB _id (used for edit / delete)
                 pairTag: pairDirectionTag,
                 sessionRaw: rawSession === 'N/A' ? '' : rawSession,
-                fvgTap: props['15 FVG TAP']?.select?.name || '',
-                smt: props['SMT DIVERGENCE']?.select?.name || '',
+                fvgTap: item.fvgTap || '',
+                smt: item.smtDivergence || '',
                 rules: rulesArr,
                 rulesCount: rulesArr.length,
                 psych: psychArr,
-                entryPrice: numProp('ENTRY PRICE'),
-                slPrice: numProp('SL PRICE'),
-                lotSize: numProp('LOT SIZE & RISK'),
-                profitAmount: numProp('PROFITE AMOUNT'),
-                lossAmount: numProp('LOSS AMOUNT'),
-                outcomeRaw: props['OUTCOME']?.select?.name || '',
+                entryPrice: num(item.entryPrice),
+                slPrice: num(item.slPrice),
+                lotSize: num(item.lotSizeRisk),
+                profitAmount: num(item.profitAmount),
+                lossAmount: num(item.lossAmount),
+                outcomeRaw: item.outcome || '',
                 rawNote: rawNoteText,
                 date: dateStr,
                 day: dayOfWeek,
@@ -1093,10 +1115,10 @@ export default function App() {
                 slPips: slPipsVal,
                 tpPips: tpPipsVal,
                 pnl: pnl,
-                note: noteText.trim() !== '' ? noteText : 'නෝට් එකක් නොමැත',
-                beforeCharts: beforeFiles.map(f => f?.file?.url || f?.external?.url).filter(Boolean),
-                afterCharts: afterFiles.map(f => f?.file?.url || f?.external?.url).filter(Boolean),
-                result: outcome.toLowerCase().includes('win') ? 'Win' : 'Loss'
+                note: rawNoteText.trim() !== '' ? rawNoteText : 'නෝට් එකක් නොමැත',
+                beforeCharts: shots.before,
+                afterCharts: shots.after,
+                result: String(outcome).toLowerCase().includes('win') ? 'Win' : 'Loss'
             };
         });
 
@@ -1172,7 +1194,7 @@ export default function App() {
         const profitFactor = totalLossAmount > 0 ? (totalWinAmount / totalLossAmount).toFixed(2) : totalWinAmount.toFixed(2);
         const rMultiple = (totalPnL / 150).toFixed(1);
 
-        setKpiNetProfit(`${totalPnL >= 0 ? '+' : ''}$${totalPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+        setKpiNetProfit(`${totalPnL >= 0 ? '+' : '-'}$${Math.abs(totalPnL).toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
         setKpiRMultiple(`${rMultiple >= 0 ? '+' : ''}${rMultiple} R`);
         setKpiWinRate(`${winRate}%`);
         setKpiWinLossRatio(`${wins}W / ${losses}L`);
@@ -1906,15 +1928,15 @@ ${languageInstruction} Structure it as follows:
                 );
             })()}
 
-            {/* Top Notion Notification Toast Pop-up */}
-            {notionToast.show && (
+            {/* Top notification toast pop-up */}
+            {appToast.show && (
                 <div className="fixed bottom-6 right-6 z-50">
-                    <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl shadow-2xl border text-xs font-bold ${notionToast.type === 'success'
+                    <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl shadow-2xl border text-xs font-bold ${appToast.type === 'success'
                             ? 'bg-emerald-950/95 border-emerald-500/40 text-emerald-200 shadow-black/30'
                             : 'bg-rose-950/95 border-rose-500/40 text-rose-200 shadow-black/30'
                         }`}>
-                        <span className="text-base">{notionToast.type === 'success' ? <Ico n="check" className="w-5 h-5" /> : <Ico n="alert" className="w-5 h-5" />}</span>
-                        <span>{notionToast.message}</span>
+                        <span className="text-base">{appToast.type === 'success' ? <Ico n="check" className="w-5 h-5" /> : <Ico n="alert" className="w-5 h-5" />}</span>
+                        <span>{appToast.message}</span>
                     </div>
                 </div>
             )}
@@ -2068,7 +2090,7 @@ ${languageInstruction} Structure it as follows:
                         </button>
 
                         <button
-                            onClick={() => fetchNotionData(false)}
+                            onClick={() => fetchTrades(false)}
                             className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition-all duration-200 flex items-center gap-2 text-xs shadow-md shadow-indigo-500/20 active:scale-95"
                         >
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2105,9 +2127,9 @@ ${languageInstruction} Structure it as follows:
                     <div className={`flex flex-wrap items-center gap-3 p-4 rounded-2xl border text-xs font-semibold ${isDark ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
                         <span className="text-base">📡</span>
                         <div className="flex-1 min-w-[220px]">
-                            <b>{!isOnline ? 'You are offline.' : "Can't reach the server / Notion right now."}</b> Showing the last loaded data. The dashboard keeps retrying and will refresh by itself once the connection is back.
+                            <b>{!isOnline ? 'You are offline.' : "Can't reach the server / database right now."}</b> Showing the last loaded data. The dashboard keeps retrying and will refresh by itself once the connection is back.
                         </div>
-                        <button onClick={() => fetchNotionData(false)} className="px-3 py-1.5 rounded-lg bg-amber-500 text-black font-bold hover:bg-amber-400 transition">Retry now</button>
+                        <button onClick={() => fetchTrades(false)} className="px-3 py-1.5 rounded-lg bg-amber-500 text-black font-bold hover:bg-amber-400 transition">Retry now</button>
                     </div>
                 )}
 
@@ -2125,18 +2147,18 @@ ${languageInstruction} Structure it as follows:
                 {/* KPI Cards Grid */}
                 <section className="mp-kpi grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div className={`relative p-6 rounded-2xl border shadow-[0_1px_2px_rgba(0,0,0,0.3)] group transition-all duration-300 overflow-hidden ${isDark ? 'bg-[#0E1426] border-white/10' : 'bg-white border-slate-200'}`}>
-                        <span className="absolute inset-x-0 top-0 h-0.5 bg-emerald-500"></span>
+                        <span className={`absolute inset-x-0 top-0 h-0.5 transition-colors duration-500 ${netNeg ? 'bg-rose-500' : 'bg-emerald-500'}`}></span>
                         <div className="flex items-center justify-between mb-3 relative z-10">
                             <span className="text-xs uppercase tracking-wider font-bold text-slate-400">Total Net PnL ({activeDatabase.toUpperCase()})</span>
-                            <div className="p-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shadow-inner">
+                            <div className={`p-2.5 rounded-2xl border shadow-inner transition-colors duration-500 ${netNeg ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'}`}>
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
                             </div>
                         </div>
                         <div className="flex items-baseline space-x-2 relative z-10">
-                            <span className="text-2xl lg:text-3xl font-black text-emerald-400 tracking-tight "><CountUp value={kpiNetProfit} /></span>
-                            <span className="text-[11px] text-emerald-300 font-bold bg-emerald-500/15 px-2 py-0.5 rounded-lg border border-emerald-500/30 shadow-sm">{kpiRMultiple}</span>
+                            <span className={`text-2xl lg:text-3xl font-black tracking-tight transition-colors duration-500 ${netNeg ? 'text-rose-400' : 'text-emerald-400'}`}><CountUp value={kpiNetProfit} /></span>
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border shadow-sm ${netNeg ? 'text-rose-300 bg-rose-500/15 border-rose-500/30' : 'text-emerald-300 bg-emerald-500/15 border-emerald-500/30'}`}>{kpiRMultiple}</span>
                         </div>
                     </div>
 
@@ -2612,7 +2634,7 @@ ${languageInstruction} Structure it as follows:
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
                                 </svg>
-                                {editingPageId ? 'Edit Trade' : 'Add Trade to Notion'} ({activeDatabase.toUpperCase()})
+                                {editingPageId ? 'Edit Trade' : 'Add Trade'} ({activeDatabase.toUpperCase()})
                             </h3>
                             <button onClick={() => closeAddModal()} className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 transition flex items-center justify-center font-bold text-sm">
                                 ✕
@@ -2678,7 +2700,7 @@ ${languageInstruction} Structure it as follows:
                                     <label className="block font-bold mb-1 text-slate-400">OUTCOME <span className="text-rose-400">*</span></label>
                                     <select 
                                         value={newTradeForm.outcome} 
-                                        onChange={(e) => setNewTradeForm({...newTradeForm, outcome: e.target.value})}
+                                        onChange={(e) => { const v = e.target.value; setNewTradeForm({...newTradeForm, outcome: v, ...(v === 'Win' ? { lossAmount: '' } : v === 'Loss' ? { profitAmount: '' } : {}) }); }}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     >
                                         <option value="" disabled>Select outcome...</option>
@@ -2704,7 +2726,7 @@ ${languageInstruction} Structure it as follows:
                                 </select>
                             </div>
 
-                            {/* Execution Rules Checkboxes (Auto-calculates Setup Score in Notion via Formula) */}
+                            {/* Execution Rules Checkboxes (Setup Score is calculated automatically) */}
                             <div>
                                 <label className="block font-bold mb-1 text-slate-400">EXECUTION RULES (Select to calculate Setup Score)</label>
                                 <div className={`p-3 rounded-xl border grid grid-cols-1 sm:grid-cols-2 gap-2 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
@@ -2781,23 +2803,25 @@ ${languageInstruction} Structure it as follows:
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
-                                <div>
+                                <div className={`transition-all duration-500 ${newTradeForm.outcome === 'Loss' ? 'opacity-35 blur-[2px] pointer-events-none select-none' : ''}`} aria-disabled={newTradeForm.outcome === 'Loss'}>
                                     <label className="block font-bold mb-1 text-slate-400">PROFIT AMOUNT ($)</label>
                                     <input 
                                         type="number" 
                                         step="0.01"
                                         placeholder="e.g. 150"
+                                        disabled={newTradeForm.outcome === 'Loss'}
                                         value={newTradeForm.profitAmount} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, profitAmount: e.target.value})}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
-                                <div>
+                                <div className={`transition-all duration-500 ${newTradeForm.outcome === 'Win' ? 'opacity-35 blur-[2px] pointer-events-none select-none' : ''}`} aria-disabled={newTradeForm.outcome === 'Win'}>
                                     <label className="block font-bold mb-1 text-slate-400">LOSS AMOUNT ($)</label>
                                     <input 
                                         type="number" 
                                         step="0.01"
                                         placeholder="e.g. 0"
+                                        disabled={newTradeForm.outcome === 'Win'}
                                         value={newTradeForm.lossAmount} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, lossAmount: e.target.value})}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
@@ -2857,7 +2881,7 @@ ${languageInstruction} Structure it as follows:
                             {/* Direct image file uploads from computer (multiple images allowed) */}
                             <div className="grid grid-cols-2 gap-4">
                                 {[
-                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#7C3AED]' },
+                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#2391FF]' },
                                     { id: 'after', label: 'AFTER CHART (Upload Images)', field: 'afterChartFiles', btn: 'file:bg-[#7C3AED]' }
                                 ].map(({ id, label, field, btn }) => (
                                     <div key={id}>
@@ -2903,7 +2927,7 @@ ${languageInstruction} Structure it as follows:
                             )}
 
                             <p className="text-[11px] font-semibold text-rose-400">
-                                {editingPageId ? 'Editing an existing trade. Chart images stay as they are (change images directly in Notion). All fields marked * are still required.' : '* Required: Pair, Session, FVG Tap, SMT, Outcome, Entry Price, SL Price, Lot Size & Risk, and a Before + After chart image (upload a file or paste a link for each).'}
+                                {editingPageId ? 'Editing an existing trade. Chart images stay as they are (to replace images, delete the trade and add it again). All fields marked * are still required.' : '* Required: Pair, Session, FVG Tap, SMT, Outcome, Entry Price, SL Price, Lot Size & Risk, and a Before + After chart image (upload a file or paste a link for each).'}
                             </p>
 
                             <div>
@@ -2930,7 +2954,7 @@ ${languageInstruction} Structure it as follows:
                                     disabled={isSubmittingTrade}
                                     className="px-6 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition shadow-sm"
                                 >
-                                    {isSubmittingTrade ? 'Saving to Notion...' : (editingPageId ? 'Update Trade' : 'Save Trade to Notion')}
+                                    {isSubmittingTrade ? 'Saving...' : (editingPageId ? 'Update Trade' : 'Save Trade')}
                                 </button>
                             </div>
                         </form>
@@ -2947,7 +2971,7 @@ ${languageInstruction} Structure it as follows:
                         <p className={`mt-2 text-sm leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
                             {confirmDelete.trade.pair} · {tradeDateKey(confirmDelete.trade) || confirmDelete.trade.date} · {fmtSigned(confirmDelete.trade.pnl)}
                         </p>
-                        <p className="mt-1 text-xs text-slate-500">It will be moved to Notion's Trash. You can restore it there within 30 days.</p>
+                        <p className="mt-1 text-xs text-slate-500">This permanently deletes the trade and cannot be undone.</p>
                         <div className="mt-6 flex gap-3">
                             <button disabled={isDeleting} onClick={() => setConfirmDelete({ show: false, trade: null })} className="flex-1 px-4 py-3 rounded-xl bg-slate-800 text-slate-200 text-sm font-bold hover:bg-slate-700 transition">Cancel</button>
                             <button disabled={isDeleting} onClick={handleDeleteTrade} className="flex-1 px-4 py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold transition shadow-md shadow-rose-500/20">

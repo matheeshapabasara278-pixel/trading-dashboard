@@ -687,6 +687,16 @@ export default function App() {
         return () => window.removeEventListener('keydown', onKey);
     }, []);
     const bootDone = (dataReady && minDone) || failsafe;
+    // Interface style: 'aurora' (indigo glass) or 'terminal' (flat, amber, monospace)
+    const [uiTheme, setUiTheme] = useState(() => { try { return localStorage.getItem('mp-ui-theme') === 'terminal' ? 'terminal' : 'aurora'; } catch (e) { return 'aurora'; } });
+    const uiThemeRef = useRef(uiTheme);
+    uiThemeRef.current = uiTheme;
+    const toggleUiTheme = () => setUiTheme(t => {
+        const next = t === 'aurora' ? 'terminal' : 'aurora';
+        try { localStorage.setItem('mp-ui-theme', next); } catch (e) { }
+        return next;
+    });
+    useEffect(() => { if (trades.length) renderCharts(trades); }, [uiTheme]); // re-colour charts on style change
     // Switching Live <-> Backtest always lands on Overview, scrolled to the top
     const dbFirstRun = useRef(true);
     useEffect(() => {
@@ -1213,6 +1223,11 @@ export default function App() {
     const renderCharts = (data) => {
         const isDark = isDarkRef.current; // always use the latest theme (polling closures can be stale)
         const k = chartKit(isDark);
+        const T = uiThemeRef.current === 'terminal';
+        const A = T
+            ? { line: '#F5A524', f0: 'rgba(245,165,36,0.30)', f1: 'rgba(245,165,36,0.07)', f2: 'rgba(245,165,36,0)', hov: '#F5A524', cross: 'rgba(245,165,36,0.5)', pie: ['#F5A524', '#7C8596'] }
+            : { line: '#818CF8', f0: 'rgba(99, 102, 241, 0.34)', f1: 'rgba(99, 102, 241, 0.08)', f2: 'rgba(99, 102, 241, 0)', hov: '#6366F1', cross: 'rgba(129,140,248,0.5)', pie: ['#6366F1', '#A78BFA'] };
+        if (T) k.tooltip = { ...k.tooltip, borderColor: 'rgba(245,165,36,0.4)' };
         const sortedTrades = [...data]; // already oldest -> newest
 
         let cumulative = 0;
@@ -1223,9 +1238,9 @@ export default function App() {
         if (equityChartRef.current) {
             const ctx = equityChartRef.current.getContext('2d');
             const gradient = ctx.createLinearGradient(0, 0, 0, 320);
-            gradient.addColorStop(0, 'rgba(99, 102, 241, 0.34)');
-            gradient.addColorStop(0.6, 'rgba(99, 102, 241, 0.08)');
-            gradient.addColorStop(1, 'rgba(99, 102, 241, 0)');
+            gradient.addColorStop(0, A.f0);
+            gradient.addColorStop(0.6, A.f1);
+            gradient.addColorStop(1, A.f2);
 
             equityInstance.current = new Chart(ctx, {
                 type: 'line',
@@ -1233,7 +1248,7 @@ export default function App() {
                     labels: eqLabels,
                     datasets: [{
                         data: eqData,
-                        borderColor: '#818CF8',
+                        borderColor: A.line,
                         borderWidth: 3,
                         borderCapStyle: 'round',
                         fill: true,
@@ -1242,7 +1257,7 @@ export default function App() {
                         pointRadius: 0,
                         pointHoverRadius: 6,
                         pointHoverBackgroundColor: '#fff',
-                        pointHoverBorderColor: '#6366F1',
+                        pointHoverBorderColor: A.hov,
                         pointHoverBorderWidth: 3
                     }]
                 },
@@ -1278,7 +1293,7 @@ export default function App() {
                         if (!a.length) return;
                         const { ctx: g, chartArea: { top, bottom } } = c;
                         g.save();
-                        g.strokeStyle = 'rgba(129,140,248,0.5)';
+                        g.strokeStyle = A.cross;
                         g.setLineDash([4, 4]);
                         g.beginPath(); g.moveTo(a[0].element.x, top); g.lineTo(a[0].element.x, bottom); g.stroke();
                         g.restore();
@@ -1341,7 +1356,7 @@ export default function App() {
                 type: 'doughnut',
                 data: {
                     labels: ['Buy (Long)', 'Sell (Short)'],
-                    datasets: [{ data: [buyCount, sellCount], backgroundColor: ['#6366F1', '#A78BFA'], borderWidth: 0, borderRadius: 10, spacing: 4, hoverOffset: 6 }]
+                    datasets: [{ data: [buyCount, sellCount], backgroundColor: A.pie, borderWidth: 0, borderRadius: 10, spacing: 4, hoverOffset: 6 }]
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: k.tooltip }, cutout: '76%' }
             });
@@ -1415,14 +1430,13 @@ export default function App() {
             });
         } else {
             if (!customStartDate || !customEndDate) {
-                alert("⚠️ कृपया From Date आणि To Date दोन्ही नीट निवडा.");
+                alert("⚠️ Please select both a From date and a To date.");
                 return;
             }
             reportTitleKey = `${customStartDate} to ${customEndDate}`;
             const sDate = new Date(customStartDate);
             const eDate = new Date(customEndDate);
             eDate.setHours(23, 59, 59, 999);
-
             filteredTrades = trades.filter(t => {
                 if (!t.date || t.date === 'N/A') return false;
                 const d = new Date(t.date);
@@ -1431,204 +1445,385 @@ export default function App() {
         }
 
         if (filteredTrades.length === 0) {
-            alert(`⚠️ ${reportTitleKey} कालावधीसाठी कोणतीही ट्रेड सापडली नाही!`);
+            alert(`⚠️ No trades found for ${reportTitleKey}.`);
             return;
         }
 
-        const tempEquityCanvas = document.createElement('canvas');
-        tempEquityCanvas.width = 600;
-        tempEquityCanvas.height = 300;
-        const sortedFiltered = [...filteredTrades]; // already oldest -> newest
-        let cum = 0;
-        const eqLbls = ['Start', ...sortedFiltered.map((_, i) => `T-${i + 1}`)];
-        const eqVals = [0, ...sortedFiltered.map(t => { cum += t.pnl; return cum; })];
+        // ---------- Metrics ----------
+        const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const usd = (v) => `$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        const sgn = (v) => `${v < 0 ? '-' : '+'}${usd(v)}`;
+        const cls = (v) => (v >= 0 ? 'pos' : 'neg');
 
-        const eqChart = new Chart(tempEquityCanvas.getContext('2d'), {
-            type: 'line',
-            data: {
-                labels: eqLbls,
-                datasets: [{
-                    data: eqVals,
-                    borderColor: '#6366F1',
-                    borderWidth: 2.5,
-                    fill: true,
-                    backgroundColor: 'rgba(20, 184, 166, 0.15)',
-                    tension: 0.3,
-                    pointRadius: 2
-                }]
-            },
-            options: {
-                responsive: false,
-                animation: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: { grid: { display: false }, ticks: { color: '#64748B', font: { size: 9 } } },
-                    y: { grid: { color: 'rgba(0,0,0,0.08)' }, ticks: { color: '#64748B', font: { size: 9 } } }
-                }
-            }
+        const n = filteredTrades.length;
+        const fWins = filteredTrades.filter(t => t.result === 'Win').length;
+        const fLosses = n - fWins;
+        const winRateNum = (fWins / n) * 100;
+        const winRate = winRateNum.toFixed(1);
+        const totalPeriodPnL = filteredTrades.reduce((a, t) => a + t.pnl, 0);
+        const grossProfit = filteredTrades.filter(t => t.pnl > 0).reduce((a, t) => a + t.pnl, 0);
+        const grossLoss = Math.abs(filteredTrades.filter(t => t.pnl < 0).reduce((a, t) => a + t.pnl, 0));
+        const profitFactor = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : (grossProfit > 0 ? '∞' : '0.00');
+        const winsArr = filteredTrades.filter(t => t.result === 'Win');
+        const lossArr = filteredTrades.filter(t => t.result === 'Loss');
+        const avgWin = winsArr.length ? winsArr.reduce((a, t) => a + t.pnl, 0) / winsArr.length : 0;
+        const avgLoss = lossArr.length ? lossArr.reduce((a, t) => a + t.pnl, 0) / lossArr.length : 0;
+        const expectancy = totalPeriodPnL / n;
+        const rrOf = (t) => parseFloat(String(t.rr).split(':')[1]) || 2;
+        const netR = filteredTrades.reduce((a, t) => a + (t.result === 'Win' ? rrOf(t) : -1), 0);
+        const best = filteredTrades.reduce((a, t) => (t.pnl > a.pnl ? t : a), filteredTrades[0]);
+        const worst = filteredTrades.reduce((a, t) => (t.pnl < a.pnl ? t : a), filteredTrades[0]);
+
+        let cum = 0, peak = 0, maxDD = 0;
+        const eqVals = [0, ...filteredTrades.map(t => { cum += t.pnl; peak = Math.max(peak, cum); maxDD = Math.max(maxDD, peak - cum); return cum; })];
+        const eqLbls = ['Start', ...filteredTrades.map((_, i) => `T-${i + 1}`)];
+
+        let curW = 0, curL = 0, maxW = 0, maxL = 0;
+        filteredTrades.forEach(t => {
+            if (t.result === 'Win') { curW++; curL = 0; } else { curL++; curW = 0; }
+            maxW = Math.max(maxW, curW); maxL = Math.max(maxL, curL);
         });
 
-        const tempDonutCanvas = document.createElement('canvas');
-        tempDonutCanvas.width = 300;
-        tempDonutCanvas.height = 300;
-        const fWins = filteredTrades.filter(t => t.result === 'Win').length;
-        const fLosses = filteredTrades.filter(t => t.result === 'Loss').length;
+        const groupBy = (keyFn) => {
+            const m = {};
+            filteredTrades.forEach(t => { const k = keyFn(t); (m[k] = m[k] || []).push(t); });
+            return Object.entries(m).map(([k, arr]) => {
+                const w = arr.filter(t => t.result === 'Win').length;
+                return { k, n: arr.length, w, l: arr.length - w, wr: (w / arr.length) * 100, pnl: arr.reduce((a, t) => a + t.pnl, 0) };
+            }).sort((a, b) => b.pnl - a.pnl);
+        };
+        const bySession = groupBy(t => t.session || 'N/A');
+        const byDirection = groupBy(t => t.direction === 'SHORT' ? 'Short (Sell)' : 'Long (Buy)');
+        const byPair = groupBy(t => t.pair || 'N/A');
+        const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+        const dayStats = weekdays.map(d => {
+            const arr = filteredTrades.filter(t => t.day === d);
+            return { d, n: arr.length, w: arr.filter(t => t.result === 'Win').length, pnl: arr.reduce((a, t) => a + t.pnl, 0) };
+        });
+        const maxAbsDay = Math.max(1, ...dayStats.map(x => Math.abs(x.pnl)));
+        const maxAbsSess = Math.max(1, ...bySession.map(x => Math.abs(x.pnl)));
 
-        const donutChart = new Chart(tempDonutCanvas.getContext('2d'), {
-            type: 'doughnut',
-            data: {
-                labels: ['Wins', 'Losses'],
-                datasets: [{
-                    data: [fWins, fLosses],
-                    backgroundColor: ['#22C55E', '#F43F5E'],
-                    borderWidth: 0
-                }]
-            },
-            options: {
-                responsive: false,
-                animation: false,
-                plugins: { legend: { display: true, position: 'bottom', labels: { font: { size: 10 } } } },
-                cutout: '75%'
+        const accountName = activeDatabase === 'backtest' ? 'Backtest Account' : 'Live Account';
+        const accountColor = activeDatabase === 'backtest' ? '#8B5CF6' : '#10B981';
+        const firstDate = filteredTrades[0].date, lastDate = filteredTrades[n - 1].date;
+        const now = new Date();
+        const reportId = `MP-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const generatedAt = now.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+        // ---------- High-resolution charts (rendered off-screen, embedded as images) ----------
+        const FONT = "'Segoe UI', Inter, Arial, sans-serif";
+        const tick = { color: '#64748B', font: { size: 20, family: FONT } };
+        const baseScales = (money) => ({
+            x: { grid: { display: false }, border: { display: false }, ticks: { ...tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+            y: {
+                border: { display: false },
+                grid: { color: (c) => (c.tick && c.tick.value === 0 ? 'rgba(15,23,42,0.35)' : 'rgba(15,23,42,0.07)'), lineWidth: (c) => (c.tick && c.tick.value === 0 ? 2 : 1) },
+                ticks: { ...tick, padding: 10, callback: money ? (v) => `$${Number(v).toLocaleString('en-US')}` : undefined }
             }
+        });
+        const mkCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+        const common = { responsive: false, animation: false, devicePixelRatio: 1 };
+
+        const eqCanvas = mkCanvas(1400, 540);
+        const eqCtx = eqCanvas.getContext('2d');
+        const eqGrad = eqCtx.createLinearGradient(0, 0, 0, 540);
+        eqGrad.addColorStop(0, 'rgba(99,102,241,0.35)');
+        eqGrad.addColorStop(1, 'rgba(99,102,241,0)');
+        const eqChart = new Chart(eqCtx, {
+            type: 'line',
+            data: { labels: eqLbls, datasets: [{ data: eqVals, borderColor: '#6366F1', borderWidth: 5, fill: true, backgroundColor: eqGrad, tension: 0.35, pointRadius: eqVals.length > 40 ? 0 : 6, pointBackgroundColor: '#fff', pointBorderColor: '#6366F1', pointBorderWidth: 3 }] },
+            options: { ...common, plugins: { legend: { display: false } }, scales: baseScales(true) }
+        });
+
+        const donutCanvas = mkCanvas(560, 560);
+        const donutChart = new Chart(donutCanvas.getContext('2d'), {
+            type: 'doughnut',
+            data: { labels: ['Wins', 'Losses'], datasets: [{ data: [fWins, fLosses], backgroundColor: ['#22C55E', '#F43F5E'], borderWidth: 0, borderRadius: 14, spacing: 6 }] },
+            options: { ...common, cutout: '76%', plugins: { legend: { display: false } } },
+            plugins: [{
+                id: 'centerText',
+                afterDraw(c) {
+                    const { ctx, chartArea: { left, right, top, bottom } } = c;
+                    const x = (left + right) / 2, y = (top + bottom) / 2;
+                    ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillStyle = '#0F172A'; ctx.font = `800 84px ${FONT}`; ctx.fillText(`${winRate}%`, x, y - 12);
+                    ctx.fillStyle = '#64748B'; ctx.font = `700 26px ${FONT}`; ctx.fillText('WIN RATE', x, y + 52);
+                    ctx.restore();
+                }
+            }]
         });
 
         setTimeout(() => {
-            const equityUrl = tempEquityCanvas.toDataURL('image/png');
-            const donutUrl = tempDonutCanvas.toDataURL('image/png');
-
-            eqChart.destroy();
-            donutChart.destroy();
+            const equityUrl = eqCanvas.toDataURL('image/png');
+            const donutUrl = donutCanvas.toDataURL('image/png');
+            [eqChart, donutChart].forEach(c => c.destroy());
 
             const printWindow = window.open('', '_blank');
             if (!printWindow) {
-                alert("Popup blocker मुळे print window उघडली नाही. कृपया Popups allow करा.");
+                alert("The print window was blocked by your popup blocker. Please allow popups and try again.");
                 return;
             }
 
-            const totalPeriodPnL = filteredTrades.reduce((acc, t) => acc + t.pnl, 0);
-            const winRate = ((fWins / filteredTrades.length) * 100).toFixed(1);
-
-            let htmlContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>MintPip Filtered Trade Report - ${reportTitleKey}</title>
-                    <style>
-                        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; padding: 30px; margin: 0; background: #fff; }
-                        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #6366F1; padding-bottom: 15px; margin-bottom: 25px; }
-                        .logo { font-size: 24px; font-weight: 900; color: #6366F1; letter-spacing: -0.5px; }
-                        .subtitle { font-size: 13px; color: #64748b; margin-top: 3px; }
-                        .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 25px; }
-                        .kpi-card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 15px; border-radius: 12px; }
-                        .kpi-title { font-size: 10px; font-weight: bold; color: #64748b; text-transform: uppercase; }
-                        .kpi-val { font-size: 18px; font-weight: 900; margin-top: 5px; color: #0f172a; }
-                        .section-title { font-size: 15px; font-weight: 800; border-left: 4px solid #6366F1; padding-left: 10px; margin: 30px 0 15px 0; color: #0f172a; }
-                        .analytics-charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; margin-bottom: 30px; page-break-inside: avoid; }
-                        .chart-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; text-align: center; }
-                        .chart-card img { max-width: 100%; height: 180px; object-fit: contain; margin-top: 10px; }
-                        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
-                        th { background: #f1f5f9; color: #475569; font-weight: bold; text-align: left; padding: 10px; border-bottom: 2px solid #cbd5e1; }
-                        td { padding: 10px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-                        .win { color: #22C55E; font-weight: bold; }
-                        .loss { color: #F43F5E; font-weight: bold; }
-                        .footer { margin-top: 40px; text-align: center; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 15px; }
-                        @media print { body { padding: 15px; } .analytics-charts-grid { break-inside: avoid; } }
-                    </style>
-                </head>
-                <body>
-                    <div class="header">
-                        <div>
-                            <div class="logo">MintPip Institutional Analytics</div>
-                            <div class="subtitle">Filtered Performance & Analytics Report — <b>${reportTitleKey}</b></div>
-                        </div>
-                        <div style="text-align: right; font-size: 11px; color: #64748b;">
-                            Generated: ${new Date().toLocaleDateString()}
-                        </div>
-                    </div>
-
-                    <div class="kpi-grid">
-                        <div class="kpi-card">
-                            <div class="kpi-title">Period Net PnL</div>
-                            <div class="kpi-val" style="color: ${totalPeriodPnL >= 0 ? '#22C55E' : '#F43F5E'}">${totalPeriodPnL >= 0 ? '+' : ''}$${totalPeriodPnL.toFixed(2)}</div>
-                        </div>
-                        <div class="kpi-card">
-                            <div class="kpi-title">Total Trades</div>
-                            <div class="kpi-val">${filteredTrades.length}</div>
-                        </div>
-                        <div class="kpi-card">
-                            <div class="kpi-title">Win Rate</div>
-                            <div class="kpi-val">${winRate}% (${fWins}W / ${fLosses}L)</div>
-                        </div>
-                        <div class="kpi-card">
-                            <div class="kpi-title">Database Mode</div>
-                            <div class="kpi-val" style="text-transform: uppercase; font-size: 14px; color: #6366F1;">${activeDatabase}</div>
-                        </div>
-                    </div>
-
-                    <div class="section-title">Analytics Charts (${reportTitleKey} Trades Only)</div>
-                    <div class="analytics-charts-grid">
-                        <div class="chart-card">
-                            <div style="font-size: 12px; font-weight: bold; color: #334155; text-align: left;">Cumulative Equity Growth (Line Chart)</div>
-                            <img src="${equityUrl}" alt="Equity Growth" />
-                        </div>
-                        <div class="chart-card">
-                            <div style="font-size: 12px; font-weight: bold; color: #334155; text-align: left;">Win / Loss Distribution</div>
-                            <img src="${donutUrl}" alt="Win Loss Distribution" />
-                        </div>
-                    </div>
-
-                    <div class="section-title">Executed Trades Summary Table & Details</div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Date</th>
-                                <th>Pair</th>
-                                <th>Session</th>
-                                <th>Setup Score</th>
-                                <th>Direction</th>
-                                <th>R:R</th>
-                                <th>SL / TP</th>
-                                <th>PnL ($)</th>
-                                <th>Result</th>
-                                <th>Lesson / Notes</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-            `;
-
-            filteredTrades.forEach(t => {
-                htmlContent += `
-                    <tr>
-                        <td>${t.date}</td>
-                        <td><b>${t.pair}</b></td>
-                        <td>${t.session}</td>
-                        <td>${t.setupScore}</td>
-                        <td>${t.direction}</td>
-                        <td>${t.rr}</td>
-                        <td>${t.slPips}p / ${t.tpPips}p</td>
-                        <td class="${t.pnl >= 0 ? 'win' : 'loss'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
-                        <td class="${t.result === 'Win' ? 'win' : 'loss'}">${t.result}</td>
-                        <td style="font-size: 10px; color: #475569; max-width: 180px;">${t.note}</td>
-                    </tr>
-                `;
-            });
-
-            htmlContent += `
-                        </tbody>
+            const kpi = (title, value, sub, color, accent) => `
+                <div class="kpi" style="--accent:${accent}">
+                    <div class="kpi-title">${title}</div>
+                    <div class="kpi-val ${color || ''}">${value}</div>
+                    <div class="kpi-sub">${sub}</div>
+                </div>`;
+            const breakdown = (rows) => rows.map(r => `
+                <tr>
+                    <td><b>${esc(r.k)}</b></td>
+                    <td class="num">${r.n}</td>
+                    <td class="num">${r.w}W / ${r.l}L</td>
+                    <td><div class="bar"><i style="width:${r.wr.toFixed(0)}%"></i></div><span class="barlbl">${r.wr.toFixed(0)}%</span></td>
+                    <td class="num ${cls(r.pnl)}">${sgn(r.pnl)}</td>
+                </tr>`).join('');
+            const breakdownTable = (title, rows, firstCol) => `
+                <div class="card">
+                    <div class="card-title">${title}</div>
+                    <table class="mini">
+                        <thead><tr><th>${firstCol}</th><th class="num">Trades</th><th class="num">W / L</th><th>Win Rate</th><th class="num">Net PnL</th></tr></thead>
+                        <tbody>${breakdown(rows)}</tbody>
                     </table>
-                    <div class="footer">
-                        MintPip Trading Journal & Analytics Hub — Filtered Performance Report
-                    </div>
-                </body>
-                </html>
-            `;
+                </div>`;
+
+            const dayTiles = dayStats.map(x => {
+                const a = x.n ? Math.min(0.4, 0.1 + (Math.abs(x.pnl) / maxAbsDay) * 0.3) : 0;
+                const bg = !x.n ? '#f8fafc' : x.pnl >= 0 ? `rgba(34,197,94,${a})` : `rgba(244,63,94,${a})`;
+                return `<div class="tile" style="background:${bg}"><div class="tile-d">${x.d}</div><div class="tile-v ${x.n ? cls(x.pnl) : 'muted'}">${x.n ? sgn(x.pnl) : '—'}</div><div class="tile-n">${x.n ? `${x.n} trade${x.n === 1 ? '' : 's'} · ${Math.round((x.w / x.n) * 100)}% WR` : 'No trades'}</div></div>`;
+            }).join('');
+            const sessBars = bySession.map(x => {
+                const w = Math.max(2, (Math.abs(x.pnl) / maxAbsSess) * 50);
+                const left = x.pnl >= 0 ? 50 : 50 - w;
+                return `<div class="dv"><div class="dv-top"><b>${esc(x.k)}</b><span class="${cls(x.pnl)}"><b>${sgn(x.pnl)}</b></span></div><div class="dv-track"><i class="axis"></i><i class="fill ${x.pnl >= 0 ? 'g' : 'r'}" style="left:${left}%;width:${w}%"></i></div><div class="dv-sub">${x.n} trade${x.n === 1 ? '' : 's'} · ${x.wr.toFixed(0)}% win rate</div></div>`;
+            }).join('');
+
+            const rowsHtml = filteredTrades.map((t, i) => {
+                const hasNote = t.note && t.note !== 'නෝට් එකක් නොමැත';
+                return `
+                <tbody class="trade ${t.result === 'Win' ? 'w' : 'l'}">
+                    <tr class="main ${hasNote ? '' : 'solo'}">
+                        <td class="idx">${i + 1}</td>
+                        <td class="nowrap">${esc(t.date)}<div class="muted">${esc(t.day)}</div></td>
+                        <td><b>${esc(t.pair)}</b><div class="dir ${t.direction === 'SHORT' ? 'short' : 'long'}">${t.direction === 'SHORT' ? 'SHORT' : 'LONG'}</div></td>
+                        <td>${esc(t.session)}</td>
+                        <td class="nowrap">${esc(t.setupScore)}</td>
+                        <td class="num">${esc(t.rr)}</td>
+                        <td class="num nowrap">${esc(t.slPips)}p / ${esc(t.tpPips)}p</td>
+                        <td class="num ${cls(t.pnl)}"><b>${sgn(t.pnl)}</b></td>
+                        <td><span class="pill ${t.result === 'Win' ? 'win' : 'loss'}">${t.result}</span></td>
+                    </tr>
+                    ${hasNote ? `<tr class="note"><td></td><td colspan="8"><div class="nbox"><div class="nlabel"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>Lesson</div><div class="ntext">${esc(t.note)}</div></div></td></tr>` : ''}
+                </tbody>`;
+            }).join('');
+
+            const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>MintPip Performance Report - ${esc(reportTitleKey)}</title>
+<style>
+    @page { margin: 12mm; }
+    * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    body { font-family: ${FONT}; color: #0f172a; margin: 0; padding: 28px; background: #fff; font-size: 12px; }
+    .pos { color: #16a34a; } .neg { color: #e11d48; }
+    .muted { color: #94a3b8; font-size: 10px; } .nowrap { white-space: nowrap; } .num { text-align: right; }
+    .toolbar { position: fixed; top: 14px; right: 14px; z-index: 10; }
+    .toolbar { display: flex; gap: 8px; }
+    .toolbar button.alt { background: #fff; color: #4f46e5; border: 1px solid #c7d2fe; box-shadow: none; }
+    .toolbar button.alt.on { background: #eef2ff; border-color: #6366F1; }
+    .toolbar button { background: linear-gradient(135deg, #6366F1, #8B5CF6); color: #fff; border: 0; padding: 10px 18px; border-radius: 10px; font-weight: 700; font-size: 12px; cursor: pointer; box-shadow: 0 8px 20px -8px rgba(99,102,241,.7); }
+
+    .hero { position: relative; overflow: hidden; border-radius: 18px; padding: 26px 30px; color: #fff; background: linear-gradient(135deg, #1e1b4b 0%, #3730a3 55%, #6d28d9 100%); display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+    .hero::after { content: ""; position: absolute; right: -60px; top: -80px; width: 260px; height: 260px; border-radius: 50%; background: rgba(255,255,255,.08); }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .mark { width: 42px; height: 42px; border-radius: 12px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.3); display: flex; align-items: center; justify-content: center; }
+    .brand-name { font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+    .brand-sub { font-size: 10px; letter-spacing: .18em; text-transform: uppercase; opacity: .75; margin-top: 2px; }
+    .title { margin-top: 20px; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+    .period { margin-top: 4px; font-size: 12px; opacity: .85; }
+    .meta { text-align: right; font-size: 10.5px; line-height: 1.8; position: relative; z-index: 1; }
+    .meta b { font-weight: 700; }
+    .acct { display: inline-flex; align-items: center; gap: 7px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28); padding: 5px 12px; border-radius: 99px; font-weight: 700; font-size: 11px; margin-bottom: 8px; }
+    .acct i { width: 8px; height: 8px; border-radius: 50%; background: ${accountColor}; box-shadow: 0 0 0 3px rgba(255,255,255,.25); }
+
+    .section { margin: 26px 0 12px; display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 800; letter-spacing: -.01em; }
+    .section::before { content: ""; width: 4px; height: 16px; border-radius: 4px; background: linear-gradient(#6366F1, #8B5CF6); }
+    .section small { margin-left: auto; font-weight: 600; font-size: 10.5px; color: #94a3b8; }
+
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .kpi { position: relative; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px 16px 13px; overflow: hidden; }
+    .kpi::before { content: ""; position: absolute; left: 0; top: 0; right: 0; height: 3px; background: var(--accent); }
+    .kpi-title { font-size: 9.5px; font-weight: 800; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
+    .kpi-val { font-size: 21px; font-weight: 800; margin-top: 6px; letter-spacing: -.02em; }
+    .kpi-sub { font-size: 10px; color: #94a3b8; margin-top: 3px; }
+
+    .grid-2-1 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+    .grid-1-1 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px; break-inside: avoid; page-break-inside: avoid; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+    .card-title { font-size: 11.5px; font-weight: 800; color: #334155; margin-bottom: 4px; }
+    .card-sub { font-size: 10px; color: #94a3b8; margin-bottom: 8px; }
+    .card img { width: 100%; display: block; }
+    .donut-wrap { display: flex; flex-direction: column; align-items: center; }
+    .donut-wrap img { width: 190px; margin: 6px 0 10px; }
+    .legend { display: flex; gap: 16px; font-size: 10.5px; font-weight: 700; color: #475569; }
+    .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; }
+
+    .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; margin-top: 12px; break-inside: avoid; }
+    .stat { padding: 12px 14px; border-right: 1px solid #e2e8f0; background: #fff; }
+    .stat:last-child { border-right: 0; }
+    .stat .l { font-size: 9px; font-weight: 800; letter-spacing: .08em; color: #64748b; text-transform: uppercase; }
+    .stat .v { font-size: 14px; font-weight: 800; margin-top: 4px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    table.mini { font-size: 10.5px; margin-top: 6px; }
+    table.mini th { text-align: left; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: #64748b; padding: 6px 4px; border-bottom: 1px solid #e2e8f0; }
+    table.mini td { padding: 7px 4px; border-bottom: 1px solid #f1f5f9; }
+    table.mini th.num, table.mini td.num { text-align: right; }
+    .bar { display: inline-block; width: 52px; height: 6px; border-radius: 99px; background: #e2e8f0; vertical-align: middle; overflow: hidden; }
+    .bar i { display: block; height: 100%; background: linear-gradient(90deg, #6366F1, #8B5CF6); }
+    .barlbl { margin-left: 6px; font-weight: 700; color: #475569; }
+
+    table.log { width: 100%; border-collapse: separate; border-spacing: 0 12px; font-size: 10px; margin-top: -2px; }
+    table.log thead { display: table-header-group; }
+    table.log th { background: #0f172a; color: #e2e8f0; text-align: left; font-size: 8.5px; letter-spacing: .07em; text-transform: uppercase; padding: 9px 7px; }
+    table.log th:first-child { border-radius: 10px 0 0 10px; } table.log th:last-child { border-radius: 0 10px 10px 0; }
+    table.log th.num { text-align: right; }
+    table.log tbody.trade { break-inside: avoid; page-break-inside: avoid; }
+    table.log tr.main td { background: #fff; border-top: 1px solid #dfe5f3; padding: 11px 7px 8px; vertical-align: top; }
+    table.log tr.main td:first-child { border-left: 1px solid #dfe5f3; border-top-left-radius: 12px; }
+    table.log tr.main td:last-child { border-right: 1px solid #dfe5f3; border-top-right-radius: 12px; }
+    table.log tr.main.solo td { border-bottom: 1px solid #dfe5f3; padding-bottom: 11px; }
+    table.log tr.main.solo td:first-child { border-bottom-left-radius: 12px; } table.log tr.main.solo td:last-child { border-bottom-right-radius: 12px; }
+    table.log tr.note td { background: #fff; border-bottom: 1px solid #dfe5f3; padding: 2px 10px 12px 7px; }
+    table.log tr.note td:first-child { border-left: 1px solid #dfe5f3; border-bottom-left-radius: 12px; padding: 0; }
+    table.log tr.note td:last-child { border-right: 1px solid #dfe5f3; border-bottom-right-radius: 12px; }
+    table.log tbody.w tr td:first-child { border-left: 4px solid #22c55e; }
+    table.log tbody.l tr td:first-child { border-left: 4px solid #f43f5e; }
+    table.log td.idx { color: #6366F1; font-weight: 800; width: 22px; }
+    .nbox { display: flex; align-items: stretch; background: #f8faff; border: 1px solid #e3e8f6; border-radius: 10px; overflow: hidden; }
+    .nlabel { flex: 0 0 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 8px 4px; background: linear-gradient(180deg, #eef2ff, #ebe5ff); color: #4f46e5; font-size: 7.5px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; border-right: 1px solid #e0e7ff; }
+    .ntext { flex: 1; padding: 10px 14px; font-size: 10px; line-height: 1.75; color: #1e293b; white-space: pre-line; word-break: break-word; }
+    .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; margin-top: 6px; }
+    .tile { border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 6px; text-align: center; }
+    .tile-d { font-size: 9px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: #475569; }
+    .tile-v { font-size: 13px; font-weight: 800; margin-top: 8px; letter-spacing: -.01em; }
+    .tile-n { font-size: 8px; color: #64748b; margin-top: 5px; line-height: 1.4; }
+    .dv { padding: 9px 0; border-bottom: 1px solid #f1f5f9; } .dv:last-child { border-bottom: 0; }
+    .dv-top { display: flex; justify-content: space-between; font-size: 11px; }
+    .dv-track { position: relative; height: 12px; margin: 8px 0 5px; border-radius: 99px; background: #f1f5f9; overflow: hidden; }
+    .dv-track .axis { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: #94a3b8; z-index: 2; }
+    .dv-track .fill { position: absolute; top: 0; bottom: 0; border-radius: 99px; }
+    .dv-track .fill.g { background: linear-gradient(90deg, #86efac, #22c55e); } .dv-track .fill.r { background: linear-gradient(90deg, #f43f5e, #fda4af); }
+    .dv-sub { font-size: 9px; color: #94a3b8; }
+    .pill { display: inline-block; padding: 3px 10px; border-radius: 99px; font-weight: 800; font-size: 9.5px; }
+    .pill.win { background: #dcfce7; color: #15803d; } .pill.loss { background: #ffe4e6; color: #be123c; }
+    .dir { font-weight: 800; font-size: 9.5px; letter-spacing: .04em; } .dir.long { color: #4f46e5; } .dir.short { color: #7c3aed; }
+
+    .footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; font-size: 9.5px; color: #94a3b8; }
+    .footer b { color: #64748b; }
+    .disclaimer { max-width: 62%; line-height: 1.6; }
+    @media print { body { padding: 0; } .toolbar { display: none; } }
+</style>
+</head>
+<body>
+    <style id="pg"></style>
+    <div class="toolbar"><button class="alt" id="bp" onclick="setO('portrait')">Portrait</button><button class="alt" id="bl" onclick="setO('landscape')">Landscape</button><button onclick="window.print()">Print / Save as PDF</button></div>
+    <script>function setO(o){document.getElementById('pg').textContent='@page{size:A4 '+o+';margin:12mm}';document.getElementById('bp').className='alt'+(o==='portrait'?' on':'');document.getElementById('bl').className='alt'+(o==='landscape'?' on':'');}</script>
+
+    <div class="hero">
+        <div>
+            <div class="brand">
+                <div class="mark"><svg width="22" height="22" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>
+                <div><div class="brand-name">MintPip</div><div class="brand-sub">Institutional Analytics</div></div>
+            </div>
+            <div class="title">Performance &amp; Analytics Report</div>
+            <div class="period">Reporting period: <b>${esc(reportTitleKey)}</b> &nbsp;·&nbsp; ${esc(firstDate)} to ${esc(lastDate)}</div>
+        </div>
+        <div class="meta">
+            <div class="acct"><i></i>${accountName}</div><br/>
+            Report ID: <b>${reportId}</b><br/>
+            Generated: <b>${generatedAt}</b><br/>
+            Trades analysed: <b>${n}</b>
+        </div>
+    </div>
+
+    <div class="section">Executive Summary <small>${esc(reportTitleKey)}</small></div>
+    <div class="kpis">
+        ${kpi('Net PnL', sgn(totalPeriodPnL), `Gross ${usd(grossProfit)} profit · ${usd(grossLoss)} loss`, cls(totalPeriodPnL), totalPeriodPnL >= 0 ? '#22C55E' : '#F43F5E')}
+        ${kpi('Win Rate', `${winRate}%`, `${fWins} wins · ${fLosses} losses`, '', '#6366F1')}
+        ${kpi('Profit Factor', profitFactor, 'Gross profit ÷ gross loss', '', '#8B5CF6')}
+        ${kpi('Net R-Multiple', `${netR >= 0 ? '+' : '-'}${Math.abs(netR).toFixed(1)} R`, `${(netR / n).toFixed(2)} R per trade`, cls(netR), '#0EA5E9')}
+        ${kpi('Expectancy', sgn(expectancy), 'Average PnL per trade', cls(expectancy), '#14B8A6')}
+        ${kpi('Max Drawdown', maxDD > 0 ? `-${usd(maxDD)}` : '$0.00', 'Peak-to-trough in period', maxDD > 0 ? 'neg' : '', '#F43F5E')}
+        ${kpi('Best Trade', sgn(best.pnl), `${esc(best.pair)} · ${esc(best.date)}`, cls(best.pnl), '#22C55E')}
+        ${kpi('Worst Trade', sgn(worst.pnl), `${esc(worst.pair)} · ${esc(worst.date)}`, cls(worst.pnl), '#F59E0B')}
+    </div>
+
+    <div class="section">Performance Charts <small>Equity, outcome mix, weekday &amp; session PnL</small></div>
+    <div class="grid-2-1">
+        <div class="card">
+            <div class="card-title">Cumulative Equity Growth</div>
+            <div class="card-sub">Running net PnL across the period (start = $0)</div>
+            <img src="${equityUrl}" alt="Equity growth" />
+        </div>
+        <div class="card donut-wrap">
+            <div class="card-title" style="align-self:flex-start">Win / Loss Distribution</div>
+            <img src="${donutUrl}" alt="Win loss" />
+            <div class="legend"><span><i style="background:#22C55E"></i>Wins ${fWins}</span><span><i style="background:#F43F5E"></i>Losses ${fLosses}</span></div>
+        </div>
+    </div>
+    <div class="grid-1-1" style="margin-top:12px">
+        <div class="card">
+            <div class="card-title">Weekday Performance</div>
+            <div class="card-sub">Net PnL per trading day · darker tile = bigger result</div>
+            <div class="tiles">${dayTiles}</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Session Performance</div>
+            <div class="card-sub">Net PnL per session · bars grow right for profit, left for loss</div>
+            ${sessBars}
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat"><div class="l">Average Win</div><div class="v pos">${avgWin ? sgn(avgWin) : '$0.00'}</div></div>
+        <div class="stat"><div class="l">Average Loss</div><div class="v neg">${avgLoss ? sgn(avgLoss) : '$0.00'}</div></div>
+        <div class="stat"><div class="l">Max Win Streak</div><div class="v">${maxW}</div></div>
+        <div class="stat"><div class="l">Max Loss Streak</div><div class="v">${maxL}</div></div>
+        <div class="stat"><div class="l">Gross Profit</div><div class="v pos">${usd(grossProfit)}</div></div>
+        <div class="stat"><div class="l">Gross Loss</div><div class="v neg">${usd(grossLoss)}</div></div>
+    </div>
+
+    <div class="section">Performance Breakdown <small>Where the edge is coming from</small></div>
+    <div class="grid-3">
+        ${breakdownTable('By Session', bySession, 'Session')}
+        ${breakdownTable('By Direction', byDirection, 'Direction')}
+    </div>
+    <div style="margin-top:12px">${breakdownTable('By Currency Pair', byPair, 'Pair')}</div>
+
+    <div class="section">Trade Log <small>${n} executed trades · oldest to newest</small></div>
+    <table class="log">
+        <thead>
+            <tr><th>#</th><th>Date</th><th>Pair / Side</th><th>Session</th><th>Setup Score</th><th class="num">R:R</th><th class="num">SL / TP</th><th class="num">PnL</th><th>Result</th></tr>
+        </thead>
+        ${rowsHtml}
+    </table>
+
+    <div class="footer">
+        <div class="disclaimer"><b>MintPip Trading Journal &amp; Analytics Hub.</b> This report is generated from your own recorded trades for the selected period and account. Figures are for personal performance review only and do not constitute financial advice. Past performance does not guarantee future results.</div>
+        <div style="text-align:right">${accountName}<br/>${reportId}<br/>${generatedAt}</div>
+    </div>
+</body>
+</html>`;
 
             printWindow.document.write(htmlContent);
             printWindow.document.close();
             printWindow.focus();
             setTimeout(() => {
                 printWindow.print();
-            }, 600);
+            }, 900);
         }, 300);
     };
 
@@ -1756,9 +1951,10 @@ ${languageInstruction} Structure it as follows:
     };
 
     return (
-        <div style={{ fontFamily: "'Plus Jakarta Sans', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }} className={`mp-root ${bootDone ? 'mp-ready' : ''} min-h-screen flex flex-col antialiased [font-variant-numeric:tabular-nums] transition-colors duration-300 ${isDark ? 'mp-dark bg-[#070B16] text-slate-200' : 'mp-light bg-[#F4F6FB] text-slate-800'}`}>
+        <div style={{ fontFamily: "'Plus Jakarta Sans', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }} className={`mp-root mp-t-${uiTheme} ${bootDone ? 'mp-ready' : ''} min-h-screen flex flex-col antialiased [font-variant-numeric:tabular-nums] transition-colors duration-300 ${isDark ? 'mp-dark bg-[#070B16] text-slate-200' : 'mp-light bg-[#F4F6FB] text-slate-800'}`}>
             <style>{`
                 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+                @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
                 .mp-dark{background-image:radial-gradient(900px 480px at 10% -8%,rgba(99,102,241,.17),transparent 60%),radial-gradient(760px 420px at 100% 0%,rgba(139,92,246,.10),transparent 55%);background-attachment:fixed}
                 .mp-root h1,.mp-root h2,.mp-root h3{letter-spacing:-.015em}
                 .mp-root header{backdrop-filter:blur(14px) saturate(1.4)}
@@ -1878,6 +2074,44 @@ ${languageInstruction} Structure it as follows:
                 .mp-root input[type="checkbox"]:checked::after{content:"";width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg) translate(-1px,-1px)}
                 .mp-light input[type="checkbox"]{border-color:#94A3B8;background-color:#fff}
                 .mp-root input[type="date"]{cursor:pointer}
+                /* ---------- Interface style switch button ---------- */
+                .mp-theme-fab{position:fixed;left:16px;bottom:16px;z-index:60;display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:99px;font-size:11px;font-weight:700;cursor:pointer;color:#E2E8F0;background:rgba(14,20,38,.82);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(12px);box-shadow:0 12px 30px -12px rgba(0,0,0,.7)}
+                .mp-theme-fab:hover{border-color:rgba(129,140,248,.6)}
+                .mp-light .mp-theme-fab{color:#334155;background:rgba(255,255,255,.9);border-color:#CBD5E1}
+                /* ---------- TERMINAL PRO style (Bloomberg / TradingView inspired) ---------- */
+                .mp-t-terminal{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace!important}
+                .mp-t-terminal [class*="rounded-"]:not([class*="rounded-full"]){border-radius:5px!important}
+                .mp-t-terminal h1,.mp-t-terminal h2,.mp-t-terminal h3{letter-spacing:0}
+                .mp-t-terminal.mp-dark{background-image:none!important;background-color:#08090B!important}
+                .mp-t-terminal.mp-dark::before,.mp-t-terminal.mp-dark::after{display:none}
+                .mp-t-terminal.mp-dark [class*="bg-[#0E1426]"],.mp-t-terminal.mp-dark [class*="bg-[#141B30]"]{background-image:none!important;backdrop-filter:none!important;box-shadow:none!important}
+                .mp-t-terminal.mp-dark [class*="bg-[#0E1426]"]{background-color:#0F1115!important;border-color:#23262D!important}
+                .mp-t-terminal.mp-dark [class*="bg-[#141B30]"]{background-color:#14171C!important;border-color:#2A2E36!important}
+                .mp-t-terminal.mp-dark header{background-color:#0B0C0F!important;border-color:#23262D!important;backdrop-filter:none}
+                .mp-t-terminal.mp-dark .fixed.inset-0{background-color:rgba(0,0,0,.72)!important}
+                .mp-t-terminal.mp-dark .text-slate-400{color:#8B93A3}
+                .mp-t-terminal main [class*="rounded-2xl"]:hover{border-color:rgba(245,165,36,.55)!important;box-shadow:none!important}
+                .mp-t-terminal main .mp-kpi>[class*="rounded-2xl"]:hover{transform:none}
+                .mp-t-terminal [class*="text-indigo"],.mp-t-terminal [class*="text-violet"],.mp-t-terminal [class*="text-[#6366F1]"],.mp-t-terminal [class*="text-[#8B5CF6]"],.mp-t-terminal [class*="text-[#A78BFA]"],.mp-t-terminal [class*="text-[#C4B5FD]"],.mp-t-terminal [class*="text-[#4F46E5]"]{color:#F5A524!important}
+                .mp-t-terminal.mp-light [class*="text-indigo"],.mp-t-terminal.mp-light [class*="text-violet"],.mp-t-terminal.mp-light [class*="text-[#6366F1]"],.mp-t-terminal.mp-light [class*="text-[#4F46E5]"]{color:#B45309!important}
+                .mp-t-terminal [class*="bg-indigo-"],.mp-t-terminal [class*="bg-violet-"],.mp-t-terminal [class*="bg-[#6366F1]/"],.mp-t-terminal [class*="bg-[#8B5CF6]/"]{background-color:rgba(245,165,36,.13)!important;border-color:rgba(245,165,36,.35)!important}
+                .mp-t-terminal [class*="bg-indigo-500"]:not([class*="/"]){background-color:#F5A524!important}
+                .mp-t-terminal [class*="border-indigo"],.mp-t-terminal [class*="border-violet"],.mp-t-terminal [class*="border-[#6366F1]"]{border-color:rgba(245,165,36,.5)!important}
+                .mp-t-terminal [class~="bg-[#6366F1]"],.mp-t-terminal [class~="bg-[#7C3AED]"],.mp-t-terminal [class~="bg-[#8B5CF6]"],.mp-t-terminal [class*="bg-indigo-"].text-white,.mp-t-terminal [class*="bg-violet-"].text-white{background-image:none!important;background-color:#F5A524!important;color:#0B0C0F!important;box-shadow:none!important;animation:none!important}
+                .mp-t-terminal [class*="file:bg-[#7C3AED]"]::file-selector-button{background:#F5A524!important;color:#0B0C0F!important}
+                .mp-t-terminal input:focus,.mp-t-terminal select:focus,.mp-t-terminal textarea:focus{border-color:#F5A524!important;box-shadow:0 0 0 2px rgba(245,165,36,.2)!important}
+                .mp-t-terminal input[type="checkbox"]:checked{background-image:none!important;background-color:#F5A524;box-shadow:none}
+                .mp-t-terminal input[type="checkbox"]:checked::after{border-color:#0B0C0F}
+                .mp-t-terminal ::selection{background:rgba(245,165,36,.35)}
+                .mp-t-terminal :focus-visible{outline-color:#F5A524}
+                .mp-t-terminal *::-webkit-scrollbar-thumb{background:rgba(245,165,36,.3)}
+                .mp-t-terminal .mp-theme-fab{border-color:rgba(245,165,36,.45);color:#F5A524}
+                .mp-t-terminal.mp-dark select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23F5A524' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")}
+                .mp-t-terminal.mp-dark select option:checked,.mp-t-terminal.mp-dark select option:hover{background:#F5A524 linear-gradient(#F5A524,#F5A524);color:#0B0C0F}
+                .mp-t-terminal .mp-splash{background:#08090B}
+                .mp-t-terminal .mp-logo{background:#F5A524;color:#0B0C0F}
+                .mp-t-terminal .mp-r1{border-top-color:#F5A524}.mp-t-terminal .mp-r2{border-bottom-color:#FDE68A}
+                .mp-t-terminal .mp-bar i{background:#F5A524}
                 .mp-light .text-emerald-300, .mp-light .text-emerald-400, .mp-light .text-emerald-500 { color: #047857; }
                 .mp-light .text-rose-300, .mp-light .text-rose-400, .mp-light .text-rose-500 { color: #be123c; }
                 .mp-light .text-amber-300, .mp-light .text-amber-400, .mp-light .text-amber-500 { color: #92400e; }
@@ -1888,9 +2122,14 @@ ${languageInstruction} Structure it as follows:
 
             <Splash done={bootDone} />
 
+            <button onClick={toggleUiTheme} className="mp-theme-fab" title="Switch interface style">
+                <Ico n="edit" className="w-3.5 h-3.5" />{uiTheme === 'aurora' ? 'Terminal Pro view' : 'Aurora view'}
+            </button>
+
             {cmdOpen && (() => {
                 const q = cmdQ.trim().toLowerCase();
                 const nav = [
+                    { label: 'Switch interface style (Aurora / Terminal Pro)', run: toggleUiTheme },
                     { label: 'Go to Overview', run: () => setActiveTab('overview') },
                     { label: 'Go to Analytics', run: () => setActiveTab('analytics') },
                     { label: 'Go to Calendar & Reports', run: () => setActiveTab('calendar') },
@@ -2872,7 +3111,7 @@ ${languageInstruction} Structure it as follows:
                             {/* Direct image file uploads from computer (multiple images allowed) */}
                             <div className="grid grid-cols-2 gap-4">
                                 {[
-                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#2391FF]' },
+                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#7C3AED]' },
                                     { id: 'after', label: 'AFTER CHART (Upload Images)', field: 'afterChartFiles', btn: 'file:bg-[#7C3AED]' }
                                 ].map(({ id, label, field, btn }) => (
                                     <div key={id}>

@@ -243,8 +243,8 @@ app.post('/api/trades/add', handleUpload, ensureDb, async (req, res) => {
   }
 });
 
-// PATCH /api/trades/:id  (edit text fields from the UI; images stay as they are)
-app.patch('/api/trades/:id', ensureDb, async (req, res) => {
+// PATCH /api/trades/:id  (edit fields from the UI; JSON or multipart. New images are ADDED to the existing ones)
+app.patch('/api/trades/:id', handleUpload, ensureDb, async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidId(id)) return res.status(400).json({ success: false, error: 'Invalid trade id.' });
@@ -263,7 +263,39 @@ app.patch('/api/trades/:id', ensureDb, async (req, res) => {
     if (b.profitAmount !== undefined) update.profitAmount = parseNum(b.profitAmount);
     if (b.lossAmount !== undefined) update.lossAmount = parseNum(b.lossAmount);
 
-    const trade = await Trade.findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true }).lean();
+    const existing = await Trade.findById(id).select('databaseType screenshotUrl').lean();
+    if (!existing) return res.status(404).json({ success: false, error: 'Trade not found.' });
+
+    // Any newly attached images go to Cloudinary and are appended to the trade's existing images
+    const folderBase = `mintpip/${existing.databaseType || 'live'}`;
+    const beforeFiles = (req.files && req.files.beforeChart) || [];
+    const afterFiles = (req.files && req.files.afterChart) || [];
+    let beforeUploads = [];
+    let afterUploads = [];
+    try {
+      [beforeUploads, afterUploads] = await Promise.all([
+        Promise.all(beforeFiles.map((f) => uploadToCloudinary(f, `${folderBase}/before`))),
+        Promise.all(afterFiles.map((f) => uploadToCloudinary(f, `${folderBase}/after`)))
+      ]);
+    } catch (uploadErr) {
+      console.error('Cloudinary Upload Error:', uploadErr.message);
+      return res.status(502).json({ success: false, error: `Cloudinary upload failed: ${uploadErr.message}` });
+    }
+
+    const newBefore = [...beforeUploads.map((r) => r.secure_url), ...splitLinks(b.beforeCharts)];
+    const newAfter = [...afterUploads.map((r) => r.secure_url), ...splitLinks(b.afterCharts)];
+    const newIds = [...beforeUploads, ...afterUploads].map((r) => r.public_id);
+
+    if (!existing.screenshotUrl && (newBefore[0] || newAfter[0])) update.screenshotUrl = newBefore[0] || newAfter[0];
+
+    const ops = { $set: update };
+    const push = {};
+    if (newBefore.length) push.beforeCharts = { $each: newBefore };
+    if (newAfter.length) push.afterCharts = { $each: newAfter };
+    if (newIds.length) push.screenshotPublicIds = { $each: newIds };
+    if (Object.keys(push).length) ops.$push = push;
+
+    const trade = await Trade.findByIdAndUpdate(id, ops, { new: true, runValidators: true }).lean();
     if (!trade) return res.status(404).json({ success: false, error: 'Trade not found.' });
 
     res.json({ success: true, data: trade });
@@ -318,7 +350,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ success: false, error: err.message || 'Internal server error' });
 });
 
-// Local Development Server Listener & Serverless Export
+// Local Development Server Listener
 if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
   connectDB().catch((err) => console.error('Initial MongoDB connection failed:', err.message));
   app.listen(PORT, () => {
@@ -326,5 +358,4 @@ if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
   });
 }
 
-// Netlify Serverless Functions සඳහා Express app එක export කිරීම අනිවාර්යයි
 module.exports = app;

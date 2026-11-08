@@ -861,30 +861,22 @@ export default function App() {
 
         setIsSubmittingTrade(true);
 
-        // ✏️ Editing an existing trade: update the same MongoDB document (images are left untouched)
+        // ✏️ Editing an existing trade: update the same MongoDB document (new images are added to the existing ones)
         if (editingPageId) {
             try {
-                const response = await fetch(`${API_BASE}/api/trades/${editingPageId}`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        date: newTradeForm.date,
-                        pairDirection: newTradeForm.pairDirection,
-                        session: newTradeForm.session,
-                        fvgTap: newTradeForm.fvgTap,
-                        smtDivergence: newTradeForm.smtDivergence,
-                        executionRules: newTradeForm.executionRules,
-                        psychologicalState: newTradeForm.psychologicalState,
-                        entryPrice: formatPrice5(newTradeForm.entryPrice),
-                        slPrice: formatPrice5(newTradeForm.slPrice),
-                        planeTarget: newTradeForm.planeTarget,
-                        lotSizeRisk: newTradeForm.lotSizeRisk,
-                        outcome: newTradeForm.outcome,
-                        profitAmount: newTradeForm.profitAmount,
-                        lossAmount: newTradeForm.lossAmount,
-                        note: newTradeForm.note
-                    })
-                });
+                // multipart/form-data so new Before / After images can be uploaded while editing
+                const editData = new FormData();
+                ['date', 'pairDirection', 'session', 'fvgTap', 'smtDivergence', 'planeTarget', 'lotSizeRisk', 'outcome', 'profitAmount', 'lossAmount', 'note']
+                    .forEach(k => editData.append(k, newTradeForm[k] ?? ''));
+                editData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
+                editData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
+                editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
+                editData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+                editData.append('beforeCharts', newTradeForm.beforeCharts); // optional new image URL(s)
+                editData.append('afterCharts', newTradeForm.afterCharts);
+                newTradeForm.beforeChartFiles.forEach(file => editData.append('beforeChart', file));
+                newTradeForm.afterChartFiles.forEach(file => editData.append('afterChart', file));
+                const response = await fetch(`${API_BASE}/api/trades/${editingPageId}`, { method: 'PATCH', body: editData });
                 if (response.ok) {
                     playSound('win');
                     closeAddModal();
@@ -2852,7 +2844,6 @@ ${languageInstruction} Structure it as follows:
                                 </div>
                             </div>
 
-                            {!editingPageId && (
                             <>
                             {/* Multi-Image URLs for Before & After Charts */}
                             <div className="grid grid-cols-2 gap-4">
@@ -2924,10 +2915,9 @@ ${languageInstruction} Structure it as follows:
                                 ))}
                             </div>
                             </>
-                            )}
 
                             <p className="text-[11px] font-semibold text-rose-400">
-                                {editingPageId ? 'Editing an existing trade. Chart images stay as they are (to replace images, delete the trade and add it again). All fields marked * are still required.' : '* Required: Pair, Session, FVG Tap, SMT, Outcome, Entry Price, SL Price, Lot Size & Risk, and a Before + After chart image (upload a file or paste a link for each).'}
+                                {editingPageId ? 'Editing an existing trade. Images already saved stay as they are, and any images you upload or link here are added to them. All fields marked * are still required.' : '* Required: Pair, Session, FVG Tap, SMT, Outcome, Entry Price, SL Price, Lot Size & Risk, and a Before + After chart image (upload a file or paste a link for each).'}
                             </p>
 
                             <div>

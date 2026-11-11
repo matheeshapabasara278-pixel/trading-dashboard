@@ -31,6 +31,13 @@ if (process.env.CLOUDINARY_CLOUD_NAME) {
 // MongoDB Atlas (connection is cached so it also works on serverless / Netlify)
 // ---------------------------------------------------------------------------
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+// The app ALWAYS uses this database (default: mintpipDB), whatever the connection string says.
+// (A connection string without a database name makes MongoDB silently fall back to the "test" database.)
+const MONGODB_DB = process.env.MONGODB_DB || 'mintpipDB';
+const SERVER_BUILD = 'mintpipDB-v2'; // shown in the terminal and in /api/health, so you can tell which index.js is really running
+console.log(`MintPip server build ${SERVER_BUILD} (target database: "${MONGODB_DB}")`);
+const TRADES_COLLECTION = process.env.MONGODB_TRADES_COLLECTION || 'trades';
+const ACCOUNTS_COLLECTION = process.env.MONGODB_ACCOUNTS_COLLECTION || 'accounts';
 let dbPromise = null;
 
 function connectDB() {
@@ -38,8 +45,16 @@ function connectDB() {
   if (!MONGODB_URI) return Promise.reject(new Error('MONGODB_URI is not configured in environment variables.'));
   if (!dbPromise) {
     dbPromise = mongoose
-      .connect(MONGODB_URI, { serverSelectionTimeoutMS: 10000 })
-      .then(() => console.log('✅ Connected to MongoDB Atlas'))
+      .connect(MONGODB_URI, { serverSelectionTimeoutMS: 10000, ...(MONGODB_DB ? { dbName: MONGODB_DB } : {}) })
+      .then(async () => {
+        // Safety net: never serve requests if we ended up in a different database (for example "test")
+        if (mongoose.connection.name !== MONGODB_DB) {
+          const wrong = mongoose.connection.name;
+          await mongoose.disconnect();
+          throw new Error(`Connected to database "${wrong}" instead of "${MONGODB_DB}". Check MONGODB_DB in your environment variables.`);
+        }
+        console.log(`✅ Connected to MongoDB Atlas -> database "${mongoose.connection.name}" (trades: "${TRADES_COLLECTION}", accounts: "${ACCOUNTS_COLLECTION}")`);
+      })
       .catch((err) => { dbPromise = null; throw err; });
   }
   return dbPromise;
@@ -85,7 +100,7 @@ const tradeSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Trade = mongoose.models.Trade || mongoose.model('Trade', tradeSchema);
+const Trade = mongoose.models.Trade || mongoose.model('Trade', tradeSchema, TRADES_COLLECTION);
 
 // ---------------------------------------------------------------------------
 // Funded account model (rules + payouts); trades reference it through accountId
@@ -109,17 +124,19 @@ const accountSchema = new mongoose.Schema(
     profitSplit: { type: Number, default: 80 },
     fee: { type: Number, default: 0 },
     color: { type: String, default: '#6366F1' },
-    payouts: [{ date: String, amount: Number }]
+    payouts: [{ date: String, amount: Number }],
+    fees: [{ date: String, label: String, amount: Number }] // extra fees: resets, retakes, add-ons (fee = initial challenge fee)
   },
   { timestamps: true }
 );
-const Account = mongoose.models.Account || mongoose.model('Account', accountSchema);
+const Account = mongoose.models.Account || mongoose.model('Account', accountSchema, ACCOUNTS_COLLECTION);
 
 const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color'];
 const pickAccount = (b = {}) => {
   const out = {};
   ACCOUNT_KEYS.forEach((k) => { if (b[k] !== undefined) out[k] = b[k]; });
   if (Array.isArray(b.payouts)) out.payouts = b.payouts.map((p) => ({ date: String(p.date || ''), amount: Number(p.amount) || 0 }));
+  if (Array.isArray(b.fees)) out.fees = b.fees.map((f) => ({ date: String(f.date || ''), label: String(f.label || 'Fee'), amount: Number(f.amount) || 0 }));
   return out;
 };
 
@@ -203,8 +220,23 @@ const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
-app.get('/api/health', (req, res) => {
-  res.json({ success: true, db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
+// Shows exactly which database / collection the app is reading and writing (open /api/health in the browser)
+app.get('/api/health', ensureDb, async (req, res) => {
+  try {
+    const [trades, live, backtest, accounts] = await Promise.all([
+      Trade.countDocuments(), Trade.countDocuments({ databaseType: 'live' }), Trade.countDocuments({ databaseType: 'backtest' }), Account.countDocuments()
+    ]);
+    res.json({
+      success: true,
+      build: SERVER_BUILD,
+      database: mongoose.connection.name,
+      host: mongoose.connection.host,
+      collections: { trades: Trade.collection.name, accounts: Account.collection.name },
+      counts: { trades, live, backtest, accounts }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // GET /api/trades?type=live|backtest  -> array of trades, oldest -> newest
@@ -276,7 +308,17 @@ app.post('/api/trades/add', handleUpload, ensureDb, async (req, res) => {
       screenshotPublicIds: [...beforeUploads, ...afterUploads].map((r) => r.public_id)
     });
 
-    res.status(201).json({ success: true, data: trade });
+    // Read it back so we only report success when the document is really stored in the database
+    const stored = await Trade.findById(trade._id).lean();
+    if (!stored) throw new Error('The trade was not found in the database after saving.');
+    const total = await Trade.countDocuments({ databaseType });
+    console.log(`💾 Trade ${trade._id} saved -> ${mongoose.connection.name}.${Trade.collection.name} (${databaseType} trades: ${total})`);
+
+    res.status(201).json({
+      success: true,
+      data: trade,
+      savedTo: { db: mongoose.connection.name, collection: Trade.collection.name, id: String(trade._id), total }
+    });
   } catch (error) {
     console.error('Save Trade Error:', error.message);
     const status = error.name === 'ValidationError' ? 400 : 500;

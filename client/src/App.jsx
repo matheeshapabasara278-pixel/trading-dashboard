@@ -3,6 +3,7 @@ import Chart from 'chart.js/auto';
 
 // Default (empty) state of the Add Trade form
 const getDefaultTradeForm = () => ({
+    accountId: null, // null = not chosen yet
     date: new Date().toLocaleDateString('en-CA'), // local date (YYYY-MM-DD)
     pairDirection: '',
     session: '',
@@ -322,6 +323,253 @@ function Splash({ done }) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Funded-account tracking (stored in this browser; trades are matched to an account by date range)
+// ---------------------------------------------------------------------------
+const todayKey = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const fm = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const HEALTH = {
+    safe: { label: 'Safe', color: '#22C55E' }, caution: { label: 'Caution', color: '#F59E0B' },
+    danger: { label: 'Danger', color: '#F97316' }, breach: { label: 'Breach risk', color: '#F43F5E' }
+};
+
+function computeAccount(acc, allTrades) {
+    const B0 = Number(acc.startBalance) || 0;
+    const list = allTrades; // already scoped to this account
+    let bal = B0, peak = B0;
+    const byDay = {};
+    list.forEach(t => { bal += t.pnl; peak = Math.max(peak, bal); byDay[t.date] = (byDay[t.date] || 0) + t.pnl; });
+    const dd = B0 * (Number(acc.maxDDPct) || 0) / 100;
+    const floor = acc.ddType === 'trailing' ? peak - dd : acc.ddType === 'locked' ? Math.min(B0, peak - dd) : B0 - dd;
+    const dailyLimit = B0 * (Number(acc.dailyLossPct) || 0) / 100;
+    const todayPnl = byDay[todayKey()] || 0;
+    const dailyUsed = Math.max(0, -todayPnl);
+    const target = B0 * (Number(acc.targetPct) || 0) / 100;
+    const profit = bal - B0;
+    const bestDay = Math.max(0, ...Object.values(byDay));
+    const dailyRatio = dailyLimit ? dailyUsed / dailyLimit : 0;
+    const ddRatio = dd ? 1 - (bal - floor) / dd : 0;
+    const worst = Math.max(dailyRatio, ddRatio);
+    return {
+        B0, list, bal, peak, floor, dd, dailyLimit, todayPnl, dailyUsed, dailyLeft: dailyLimit - dailyUsed, ddLeft: bal - floor,
+        dailyRatio, ddRatio, target, profit, days: Object.keys(byDay).length, bestDay,
+        consPct: profit > 0 ? (bestDay / profit) * 100 : 0,
+        targetProgress: target ? Math.max(0, Math.min(100, (profit / target) * 100)) : 0,
+        health: worst >= 1 ? 'breach' : worst >= 0.75 ? 'danger' : worst >= 0.5 ? 'caution' : 'safe'
+    };
+}
+
+function AccountGuard({ account, trades }) {
+    if (!account) return null;
+    const m = computeAccount(account, trades);
+    if (m.health === 'safe') return null;
+    const h = HEALTH[m.health];
+    return (
+        <div className="flex items-start gap-3 p-4 rounded-2xl border text-xs font-bold" style={{ background: `${h.color}1A`, borderColor: `${h.color}66`, color: h.color }}>
+            <Ico n="alert" className="w-4 h-4 mt-0.5" />
+            <span>{account.name}: {h.label} — daily loss {Math.round(m.dailyRatio * 100)}% used ({fm(Math.max(0, m.dailyLeft))} left today), drawdown {Math.round(Math.max(0, m.ddRatio) * 100)}% used ({fm(Math.max(0, m.ddLeft))} above the floor).</span>
+        </div>
+    );
+}
+
+const ACC_FIELDS = [
+    ['name', 'Account name', 'text'], ['firm', 'Firm', 'text'], ['startBalance', 'Starting balance ($)', 'number'], ['startDate', 'Start date', 'date'],
+    ['endDate', 'End date (optional)', 'date'], ['dailyLossPct', 'Daily loss limit (%)', 'number'], ['maxDDPct', 'Max drawdown (%)', 'number'],
+    ['targetPct', 'Profit target (%, 0 = none)', 'number'], ['minDays', 'Min trading days', 'number'],
+    ['consistencyPct', 'Consistency: best day ≤ % of profit (0 = off)', 'number'], ['profitSplit', 'Profit split (%)', 'number'], ['fee', 'Challenge fee ($)', 'number']
+];
+const ACC_EMPTY = { name: '', firm: '', type: 'Challenge', phase: 'Phase 1', status: 'Active', startBalance: '', startDate: todayKey(), endDate: '', dailyLossPct: 5, maxDDPct: 10, ddType: 'static', targetPct: 10, minDays: 0, consistencyPct: 0, profitSplit: 80, fee: 0, payouts: [] };
+const accInput = 'w-full px-3 py-2 rounded-xl border text-sm bg-[#141B30] border-[#232C45] text-slate-200';
+
+function Meter({ title, main, sub, ratio, color }) {
+    const pct = Math.max(0, Math.min(100, ratio * 100));
+    return (
+        <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45]">
+            <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">{title}</div>
+            <div className="text-2xl font-black mt-2 text-white">{main}</div>
+            <div className="h-2.5 rounded-full mt-3 overflow-hidden" style={{ background: 'rgba(148,163,184,0.18)' }}>
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color, transition: 'width 1.2s cubic-bezier(.22,1,.36,1)' }}></div>
+            </div>
+            <div className="text-[11px] mt-2 text-slate-400">{sub}</div>
+        </div>
+    );
+}
+
+function AccountsPanel({ accounts, onSave, onDelete, activeId, trades, isLive }) {
+    const [form, setForm] = useState(null); // null = closed
+    const [payout, setPayout] = useState({ date: todayKey(), amount: '' });
+    const acc = accounts.find(a => a.id === activeId) || (activeId === '__legacy' ? null : accounts[0]);
+    const m = acc ? computeAccount(acc, trades) : null;
+
+    const save = async () => {
+        if (!form.name.trim() || !(Number(form.startBalance) > 0)) { alert('Please enter an account name and a starting balance.'); return; }
+        await onSave(form);
+        setForm(null);
+    };
+    const remove = async () => {
+        if (!window.confirm(`Delete account "${acc.name}"? (Only possible when it has no trades.)`)) return;
+        await onDelete(acc);
+    };
+    const addPayout = () => {
+        const amt = parseFloat(payout.amount);
+        if (!(amt > 0)) return;
+        onSave({ ...acc, payouts: [...(acc.payouts || []), { date: payout.date, amount: amt }] });
+        setPayout({ date: todayKey(), amount: '' });
+    };
+
+    const totalFees = accounts.reduce((s, a) => s + (Number(a.fee) || 0), 0);
+    const totalPayouts = accounts.reduce((s, a) => s + (a.payouts || []).reduce((x, p) => x + p.amount, 0), 0);
+    const h = m ? HEALTH[m.health] : null;
+
+    return (
+        <div className="space-y-5">
+            {!isLive && <div className="p-4 rounded-2xl border text-xs font-bold bg-amber-500/10 border-amber-500/30 text-amber-300">You are viewing the Backtest data. Switch to Live to see funded-account metrics.</div>}
+
+            <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-black text-white">Account details</div>
+                <button onClick={() => setForm({ ...ACC_EMPTY })} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ New account</button>
+            </div>
+
+            {form && (
+                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4">
+                    <div className="text-sm font-black text-white">{form.id ? 'Edit account' : 'New funded account'}</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                        {ACC_FIELDS.map(([k, label, type]) => (
+                            <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}</span>
+                                <input type={type} value={form[k] ?? ''} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput} />
+                            </label>
+                        ))}
+                        {[['type', 'Account type', ['Challenge', 'Instant', 'Funded']], ['phase', 'Phase', ['Phase 1', 'Phase 2', 'Funded']], ['ddType', 'Drawdown type', ['static', 'trailing', 'locked']], ['status', 'Status', ['Active', 'Passed', 'Breached']]].map(([k, label, opts]) => (
+                            <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}{k === 'ddType' ? ' (locked = trails, stops at start balance)' : ''}</span>
+                                <select value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput}>{opts.map(o => <option key={o} value={o}>{o}</option>)}</select>
+                            </label>
+                        ))}
+                    </div>
+                    <div className="flex gap-2">
+                        <button onClick={save} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Save account</button>
+                        <button onClick={() => setForm(null)} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-slate-800 text-white">Cancel</button>
+                    </div>
+                </div>
+            )}
+
+            {!acc && !form && accounts.length > 0 && <p className="text-xs text-slate-400">Pick an account in the bar above to see its rules, meters and payouts.</p>}
+
+            {!acc && !form && accounts.length === 0 && (
+                <div className="p-10 rounded-2xl border text-center bg-[#0E1426] border-[#232C45]">
+                    <div className="text-lg font-black text-white">Track your funded accounts</div>
+                    <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto">Add an account with its firm rules (daily loss, max drawdown, profit target) and MintPip will show how much room you have left, every day.</p>
+                    <button onClick={() => setForm({ ...ACC_EMPTY })} className="mt-4 px-5 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Add your first account</button>
+                </div>
+            )}
+
+            {acc && m && (<>
+                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                        <div className="text-lg font-black text-white">{acc.name}</div>
+                        <div className="text-xs text-slate-400 mt-1">{acc.firm || 'No firm set'} · {acc.type} · {acc.phase} · {acc.status} · since {acc.startDate}</div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span>
+                        <button onClick={() => setForm({ ...acc })} className="px-3 py-2 rounded-xl text-xs font-bold bg-[#141B30] border border-[#232C45] text-slate-300"><Ico n="edit" /> Edit</button>
+                        <button onClick={remove} className="px-3 py-2 rounded-xl text-xs font-bold bg-rose-500/10 border border-rose-500/30 text-rose-400"><Ico n="trash" /> Delete</button>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                    <Meter title="Daily loss" main={`${fm(m.dailyUsed)} / ${fm(m.dailyLimit)}`} ratio={m.dailyRatio} color={m.dailyRatio >= 0.75 ? '#F43F5E' : m.dailyRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                        sub={`${fm(Math.max(0, m.dailyLeft))} left today · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`} />
+                    <Meter title={`Max drawdown (${acc.ddType})`} main={`${fm(Math.max(0, m.ddLeft))} left`} ratio={Math.max(0, m.ddRatio)} color={m.ddRatio >= 0.75 ? '#F43F5E' : m.ddRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                        sub={`Floor ${fm(m.floor)} · balance ${fm(m.bal)}`} />
+                    <Meter title="Profit target" main={m.target ? `${m.targetProgress.toFixed(0)}%` : 'No target'} ratio={m.targetProgress / 100} color="#6366F1"
+                        sub={m.target ? `${fm(m.profit)} of ${fm(m.target)}` : `Profit ${fm(m.profit)}`} />
+                    <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45]">
+                        <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Rules check</div>
+                        <div className="mt-2 space-y-2 text-xs text-slate-300">
+                            <div className="flex justify-between"><span>Trading days</span><b className={Number(acc.minDays) && m.days < Number(acc.minDays) ? 'text-amber-400' : 'text-emerald-400'}>{m.days}{Number(acc.minDays) ? ` / ${acc.minDays}` : ''}</b></div>
+                            {Number(acc.consistencyPct) > 0 ? (
+                                <div className="flex justify-between"><span>Best day / profit</span><b className={m.consPct > Number(acc.consistencyPct) ? 'text-rose-400' : 'text-emerald-400'}>{m.consPct.toFixed(0)}% (max {acc.consistencyPct}%)</b></div>
+                            ) : <div className="flex justify-between"><span>Consistency rule</span><b className="text-slate-400">Off</b></div>}
+                            <div className="flex justify-between"><span>Best day</span><b className="text-white">{fm(m.bestDay)}</b></div>
+                            <div className="flex justify-between"><span>Peak balance</span><b className="text-white">{fm(m.peak)}</b></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4">
+                    <div className="text-sm font-black text-white">Payouts &amp; fees</div>
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                        <div><div className="text-slate-400 font-bold">This account — fee</div><div className="text-white font-black text-lg">{fm(Number(acc.fee) || 0)}</div></div>
+                        <div><div className="text-slate-400 font-bold">This account — payouts</div><div className="text-emerald-400 font-black text-lg">{fm((acc.payouts || []).reduce((s, p) => s + p.amount, 0))}</div></div>
+                        <div><div className="text-slate-400 font-bold">All accounts — fees paid</div><div className="text-white font-black text-lg">{fm(totalFees)}</div></div>
+                        <div><div className="text-slate-400 font-bold">All accounts — net (payouts − fees)</div><div className={`font-black text-lg ${totalPayouts - totalFees >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fm(totalPayouts - totalFees)}</div></div>
+                    </div>
+                    <div className="flex flex-wrap items-end gap-2">
+                        <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Payout date</span><input type="date" value={payout.date} onChange={(e) => setPayout({ ...payout, date: e.target.value })} className={accInput} /></label>
+                        <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Amount received ($)</span><input type="number" value={payout.amount} onChange={(e) => setPayout({ ...payout, amount: e.target.value })} className={accInput} /></label>
+                        <button onClick={addPayout} className="px-4 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Add payout</button>
+                    </div>
+                    {(acc.payouts || []).length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                            {acc.payouts.map(p => (
+                                <span key={p.id} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-bold bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
+                                    {p.date} · {fm(p.amount)}
+                                    <button onClick={() => onSave({ ...acc, payouts: acc.payouts.filter(x => x.id !== p.id) })} className="opacity-70 hover:opacity-100"><Ico n="x" className="w-3 h-3" /></button>
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Only the trades you saved against this account are counted, and only closed trades, so floating loss is not included. Treat these meters as a guide and rely on your firm's own dashboard for the official limits. 
+                </p>
+            </>)}
+        </div>
+    );
+}
+
+function AccountStrip({ accounts, activeId, setActiveId, trades, legacyCount, onManage }) {
+    if (accounts.length === 0) {
+        return (
+            <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border bg-[#0E1426] border-[#232C45]">
+                <span className="text-xs font-bold text-slate-300">No funded account yet. Create one so every trade is tracked against its own rules.</span>
+                <button onClick={onManage} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Create account</button>
+            </div>
+        );
+    }
+    const acc = accounts.find(a => a.id === activeId);
+    const m = acc ? computeAccount(acc, trades) : null;
+    const h = m ? HEALTH[m.health] : null;
+    const stat = (label, value, cls = 'text-white') => (
+        <div className="min-w-[110px]"><div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">{label}</div><div className={`text-sm font-black mt-1 ${cls}`}>{value}</div></div>
+    );
+    return (
+        <div className="p-4 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-3" style={acc ? { borderTop: `3px solid ${acc.color || '#6366F1'}` } : undefined}>
+            <div className="flex flex-wrap items-center gap-2">
+                {accounts.map(a => (
+                    <button key={a.id} onClick={() => setActiveId(a.id)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border ${a.id === activeId ? 'bg-indigo-500/15 border-indigo-500/50 text-indigo-300' : 'bg-[#141B30] border-[#232C45] text-slate-300'}`}>
+                        <i style={{ width: 8, height: 8, borderRadius: 99, background: a.color || '#6366F1', display: 'inline-block' }}></i>{a.name}<span className="opacity-60">{a.type}</span>
+                    </button>
+                ))}
+                {legacyCount > 0 && <button onClick={() => setActiveId('__legacy')} className={`px-4 py-2 rounded-xl text-xs font-bold border ${activeId === '__legacy' ? 'bg-indigo-500/15 border-indigo-500/50 text-indigo-300' : 'bg-[#141B30] border-[#232C45] text-slate-300'}`}>Unassigned <span className="opacity-60">({legacyCount})</span></button>}
+                <button onClick={onManage} className="px-3 py-2 rounded-xl text-xs font-bold bg-[#141B30] border border-[#232C45] text-slate-300">Manage accounts</button>
+            </div>
+            {acc && m ? (
+                <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
+                    <div className="min-w-[170px]"><div className="text-sm font-black text-white">{acc.name}</div><div className="text-[11px] text-slate-400 mt-1">{acc.firm || '—'} · {acc.type} · {acc.phase}</div></div>
+                    {stat('Balance', fm(m.bal))}
+                    {stat('Net PnL', `${m.profit >= 0 ? '+' : ''}${fm(m.profit)}`, m.profit >= 0 ? 'text-emerald-400' : 'text-rose-400')}
+                    {stat('Today', `${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`, m.todayPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}
+                    {stat('Daily loss left', fm(Math.max(0, m.dailyLeft)))}
+                    {stat('Drawdown room', fm(Math.max(0, m.ddLeft)))}
+                    {m.target ? stat('Target', `${m.targetProgress.toFixed(0)}%`) : null}
+                    <div className="self-center"><span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span></div>
+                </div>
+            ) : activeId === '__legacy' ? <div className="text-xs text-slate-400">Showing older trades that were saved before accounts existed. Edit a trade to assign it to an account.</div> : null}
+        </div>
+    );
+}
+
 export default function App() {
     const [activeDatabase, setActiveDatabase] = useState('live'); // 'live' kinva 'backtest'
     const [trades, setTrades] = useState([]);
@@ -474,7 +722,7 @@ export default function App() {
     const [activeTab, setActiveTab] = useState(() => {
         try {
             const v = localStorage.getItem('mintpip_tab');
-            return ['overview', 'analytics', 'calendar'].includes(v) ? v : 'overview';
+            return ['overview', 'analytics', 'calendar', 'accounts'].includes(v) ? v : 'overview';
         } catch (_) { return 'overview'; }
     });
     useEffect(() => {
@@ -687,6 +935,61 @@ export default function App() {
         return () => window.removeEventListener('keydown', onKey);
     }, []);
     const bootDone = (dataReady && minDone) || failsafe;
+    // Funded accounts (stored in MongoDB via /api/accounts)
+    const ACCOUNT_COLORS = ['#6366F1', '#10B981', '#F59E0B', '#EC4899', '#06B6D4', '#8B5CF6'];
+    const [accounts, setAccounts] = useState([]);
+    const [activeAccountId, setActiveAccountId] = useState(() => { try { return localStorage.getItem('mp-active-account') || ''; } catch (e) { return ''; } });
+    const [legacyCount, setLegacyCount] = useState(0);
+    const rawDocsRef = useRef(null);
+    const accountRef = useRef({ id: '', hasAccounts: false });
+    accountRef.current = { id: activeAccountId, hasAccounts: accounts.length > 0 };
+    const normAcc = (a) => ({ ...a, id: a._id || a.id, payouts: (a.payouts || []).map(p => ({ ...p, id: p._id || p.id || `${p.date}-${p.amount}` })) });
+    const scopeDocs = (docs, dbType) => {
+        const { id, hasAccounts } = accountRef.current;
+        if (dbType !== 'live' || !hasAccounts) return docs;
+        return id === '__legacy' ? docs.filter(d => !d.accountId) : docs.filter(d => d.accountId === id);
+    };
+    const loadAccounts = async () => {
+        try {
+            const r = await fetch(`${API_BASE}/api/accounts`);
+            const d = await r.json();
+            if (Array.isArray(d)) setAccounts(d.map(normAcc));
+        } catch (e) { /* accounts stay empty */ }
+    };
+    useEffect(() => { loadAccounts(); }, []);
+    useEffect(() => {
+        if (accounts.length && activeAccountId !== '__legacy' && !accounts.find(a => a.id === activeAccountId)) setActiveAccountId(accounts[0].id);
+        try { localStorage.setItem('mp-active-account', activeAccountId); } catch (e) { }
+    }, [accounts, activeAccountId]);
+    useEffect(() => { // switching account re-scopes every tab (Overview, Analytics, Calendar, charts)
+        const raw = rawDocsRef.current;
+        if (raw) { parseMongoData(scopeDocs(raw.list, raw.dbType)); setLegacyCount(raw.dbType === 'live' ? raw.list.filter(d => !d.accountId).length : 0); }
+    }, [activeAccountId, accounts]);
+    const saveAccount = async (acc) => {
+        const body = { ...acc, payouts: (acc.payouts || []).map(p => ({ date: p.date, amount: p.amount })) };
+        delete body.id; delete body._id;
+        if (!acc.id) body.color = ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length];
+        try {
+            const res = await fetch(acc.id ? `${API_BASE}/api/accounts/${acc.id}` : `${API_BASE}/api/accounts`, { method: acc.id ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const d = await res.json();
+            if (!res.ok) { alert(d.error || 'Could not save the account.'); return; }
+            const saved = normAcc(d.data);
+            setAccounts(prev => acc.id ? prev.map(a => a.id === saved.id ? saved : a) : [...prev, saved]);
+            if (!acc.id) setActiveAccountId(saved.id);
+        } catch (e) { alert('Could not reach the server.'); }
+    };
+    const deleteAccount = async (acc) => {
+        try {
+            const res = await fetch(`${API_BASE}/api/accounts/${acc.id}`, { method: 'DELETE' });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) { alert(d.error || 'Could not delete the account.'); return; }
+            const rest = accounts.filter(a => a.id !== acc.id);
+            setAccounts(rest);
+            if (activeAccountId === acc.id) setActiveAccountId(rest[0] ? rest[0].id : '');
+        } catch (e) { alert('Could not reach the server.'); }
+    };
+    const resolveAccountId = () => newTradeForm.accountId ?? (accounts.length === 1 ? accounts[0].id : '');
+
     // Interface style: 'aurora' (indigo glass) or 'terminal' (flat, amber, monospace)
     const [uiTheme, setUiTheme] = useState(() => { try { return localStorage.getItem('mp-ui-theme') === 'terminal' ? 'terminal' : 'aurora'; } catch (e) { return 'aurora'; } });
     const uiThemeRef = useRef(uiTheme);
@@ -728,7 +1031,9 @@ export default function App() {
                     const signature = JSON.stringify(list);
                     const changed = !isSilent || signature !== lastDataSigRef.current;
                     lastDataSigRef.current = signature;
-                    if (changed) parseMongoData(list);
+                    if (changed) rawDocsRef.current = { list, dbType: activeDatabase };
+                    setLegacyCount(activeDatabase === 'live' ? list.filter(d => !d.accountId).length : 0);
+                    parseMongoData(scopeDocs(list, activeDatabase));
                     if (!isSilent) {
                         playSound('win');
                         showToast(`MongoDB Connected Successfully! (${activeDatabase.toUpperCase()} Database synced)`, 'success');
@@ -770,6 +1075,7 @@ export default function App() {
         setEditingPageId(t.pageId);
         setNewTradeForm({
             ...getDefaultTradeForm(),
+            accountId: t.accountId || '',
             date: tradeDateKey(t) || localDateKey(),
             pairDirection: t.pairTag || '',
             session: t.sessionRaw || '',
@@ -857,6 +1163,7 @@ export default function App() {
         if (!newTradeForm.fvgTap) missing.push('15 FVG Tap');
         if (!newTradeForm.smtDivergence) missing.push('SMT Divergence');
         if (!newTradeForm.outcome) missing.push('Outcome');
+        if (activeDatabase === 'live' && !resolveAccountId()) missing.push(accounts.length ? 'Account (choose which funded account this trade belongs to)' : 'Account (create one in the Accounts tab first)');
         if (!String(newTradeForm.lotSizeRisk).trim()) missing.push('Lot Size & Risk');
         if (!String(newTradeForm.entryPrice).trim()) missing.push('Entry Price');
         if (!String(newTradeForm.slPrice).trim()) missing.push('SL Price');
@@ -882,6 +1189,7 @@ export default function App() {
                 editData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
                 editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
                 editData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+                editData.append('accountId', activeDatabase === 'live' ? resolveAccountId() : '');
                 editData.append('beforeCharts', newTradeForm.beforeCharts); // optional new image URL(s)
                 editData.append('afterCharts', newTradeForm.afterCharts);
                 newTradeForm.beforeChartFiles.forEach(file => editData.append('beforeChart', file));
@@ -908,6 +1216,7 @@ export default function App() {
         try {
             const formData = new FormData();
             formData.append('type', activeDatabase); // 'live' or 'backtest'
+            formData.append('accountId', activeDatabase === 'live' ? resolveAccountId() : '');
             formData.append('databaseType', activeDatabase);
 
             // Text fields
@@ -1092,6 +1401,7 @@ export default function App() {
             return {
                 id: index + 1,
                 pageId: item._id, // MongoDB _id (used for edit / delete)
+                accountId: item.accountId || '',
                 pairTag: pairDirectionTag,
                 sessionRaw: rawSession === 'N/A' ? '' : rawSession,
                 fvgTap: item.fvgTap || '',
@@ -1419,35 +1729,39 @@ export default function App() {
     const exportCustomPDFReport = () => {
         let filteredTrades = [];
         let reportTitleKey = '';
+        let startKey = '', endKey = '';
 
         if (reportMode === 'month') {
             const monthName = monthNames[calMonth];
             reportTitleKey = `${monthName} ${calYear}`;
-            filteredTrades = trades.filter(t => {
-                if (!t.date || t.date === 'N/A') return false;
-                const d = new Date(t.date);
-                return !isNaN(d) && d.getMonth() === calMonth && d.getFullYear() === calYear;
-            });
+            const mm = String(calMonth + 1).padStart(2, '0');
+            startKey = `${calYear}-${mm}-01`;
+            endKey = `${calYear}-${mm}-31`;
         } else {
             if (!customStartDate || !customEndDate) {
                 alert("⚠️ Please select both a From date and a To date.");
                 return;
             }
-            reportTitleKey = `${customStartDate} to ${customEndDate}`;
-            const sDate = new Date(customStartDate);
-            const eDate = new Date(customEndDate);
-            eDate.setHours(23, 59, 59, 999);
-            filteredTrades = trades.filter(t => {
-                if (!t.date || t.date === 'N/A') return false;
-                const d = new Date(t.date);
-                return !isNaN(d) && d >= sDate && d <= eDate;
-            });
+            startKey = customStartDate <= customEndDate ? customStartDate : customEndDate;
+            endKey = customStartDate <= customEndDate ? customEndDate : customStartDate;
+            reportTitleKey = `${startKey} to ${endKey}`;
         }
+        // Plain YYYY-MM-DD comparison (no timezone shifts); trades are already scoped to the active account
+        filteredTrades = trades.filter(t => { const k = tradeDateKey(t); return k && k >= startKey && k <= endKey; });
+        filteredTrades.sort((a, b) => (tradeDateKey(a) < tradeDateKey(b) ? -1 : tradeDateKey(a) > tradeDateKey(b) ? 1 : 0));
 
         if (filteredTrades.length === 0) {
             alert(`⚠️ No trades found for ${reportTitleKey}.`);
             return;
         }
+
+        // Open the print window right now (inside the click) so popup blockers allow it
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) {
+            alert("The print window was blocked by your popup blocker. Please allow popups and try again.");
+            return;
+        }
+        printWindow.document.write('<!DOCTYPE html><html><body style="font-family:Segoe UI,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;color:#475569"><div>Generating your report…</div></body></html>');
 
         // ---------- Metrics ----------
         const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1503,8 +1817,26 @@ export default function App() {
         const maxAbsDay = Math.max(1, ...dayStats.map(x => Math.abs(x.pnl)));
         const maxAbsSess = Math.max(1, ...bySession.map(x => Math.abs(x.pnl)));
 
-        const accountName = activeDatabase === 'backtest' ? 'Backtest Account' : 'Live Account';
-        const accountColor = activeDatabase === 'backtest' ? '#8B5CF6' : '#10B981';
+        const repAcc = activeDatabase === 'live' ? accounts.find(a => a.id === activeAccountId) : null;
+        const accountName = activeDatabase === 'backtest' ? 'Backtest Account' : (repAcc ? esc(repAcc.name) : (activeAccountId === '__legacy' ? 'Legacy trades (no account)' : 'Live Account'));
+        const accountColor = activeDatabase === 'backtest' ? '#8B5CF6' : (repAcc && repAcc.color ? repAcc.color : '#10B981');
+        // Read-only account / payout / fee summary for the report (does not touch the Accounts tab logic)
+        const accStart = repAcc ? Number(repAcc.startBalance) || 0 : 0;
+        const accFee = repAcc ? Number(repAcc.fee) || 0 : 0;
+        const accPayoutsAll = repAcc ? (repAcc.payouts || []) : [];
+        const accPayoutsPeriod = accPayoutsAll.filter(p => p.date && String(p.date).slice(0, 10) >= startKey && String(p.date).slice(0, 10) <= endKey);
+        const sumPayouts = (arr) => arr.reduce((s2, p) => s2 + (Number(p.amount) || 0), 0);
+        const periodPayoutTotal = sumPayouts(accPayoutsPeriod);
+        const allPayoutTotal = sumPayouts(accPayoutsAll);
+        const accountBlock = repAcc ? `
+    <div class="section">Account &amp; Payouts <small>${esc(repAcc.firm || '')} ${esc(repAcc.type || '')} · ${esc(repAcc.phase || '')} · ${esc(repAcc.status || '')}</small></div>
+    <div class="stats" style="grid-template-columns:repeat(5,1fr)">
+        <div class="stat"><div class="l">Start Balance</div><div class="v">${usd(accStart)}</div></div>
+        <div class="stat"><div class="l">Period Return</div><div class="v ${cls(totalPeriodPnL)}">${accStart > 0 ? `${totalPeriodPnL >= 0 ? '+' : '-'}${Math.abs((totalPeriodPnL / accStart) * 100).toFixed(2)}%` : '—'}</div></div>
+        <div class="stat"><div class="l">Account Fee</div><div class="v">${usd(accFee)}</div></div>
+        <div class="stat"><div class="l">Payouts (period)</div><div class="v pos">${usd(periodPayoutTotal)}</div></div>
+        <div class="stat"><div class="l">Payouts (all time)</div><div class="v pos">${usd(allPayoutTotal)}</div></div>
+    </div>` : '';
         const firstDate = filteredTrades[0].date, lastDate = filteredTrades[n - 1].date;
         const now = new Date();
         const reportId = `MP-${now.toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -1557,12 +1889,6 @@ export default function App() {
             const equityUrl = eqCanvas.toDataURL('image/png');
             const donutUrl = donutCanvas.toDataURL('image/png');
             [eqChart, donutChart].forEach(c => c.destroy());
-
-            const printWindow = window.open('', '_blank');
-            if (!printWindow) {
-                alert("The print window was blocked by your popup blocker. Please allow popups and try again.");
-                return;
-            }
 
             const kpi = (title, value, sub, color, accent) => `
                 <div class="kpi" style="--accent:${accent}">
@@ -1795,6 +2121,7 @@ export default function App() {
         <div class="stat"><div class="l">Gross Profit</div><div class="v pos">${usd(grossProfit)}</div></div>
         <div class="stat"><div class="l">Gross Loss</div><div class="v neg">${usd(grossLoss)}</div></div>
     </div>
+    ${accountBlock}
 
     <div class="section">Performance Breakdown <small>Where the edge is coming from</small></div>
     <div class="grid-3">
@@ -1818,6 +2145,7 @@ export default function App() {
 </body>
 </html>`;
 
+            printWindow.document.open();
             printWindow.document.write(htmlContent);
             printWindow.document.close();
             printWindow.focus();
@@ -2133,6 +2461,7 @@ ${languageInstruction} Structure it as follows:
                     { label: 'Go to Overview', run: () => setActiveTab('overview') },
                     { label: 'Go to Analytics', run: () => setActiveTab('analytics') },
                     { label: 'Go to Calendar & Reports', run: () => setActiveTab('calendar') },
+                    { label: 'Go to Funded Accounts', run: () => setActiveTab('accounts') },
                     { label: 'Switch to Forward Test data', run: () => setActiveDatabase('live') },
                     { label: 'Switch to Backtest data', run: () => setActiveDatabase('backtest') }
                 ].filter(i => !q || i.label.toLowerCase().includes(q));
@@ -2335,7 +2664,8 @@ ${languageInstruction} Structure it as follows:
                     {[
                         { id: 'overview', label: 'Overview' },
                         { id: 'analytics', label: 'Analytics' },
-                        { id: 'calendar', label: 'Calendar & Reports' }
+                        { id: 'calendar', label: 'Calendar & Reports' },
+                            { id: 'accounts', label: 'Accounts' }
                     ].map(tab => (
                         <button
                             key={tab.id}
@@ -2373,6 +2703,14 @@ ${languageInstruction} Structure it as follows:
                         <span>{alert.text}</span>
                     </div>
                 ))}
+
+                {activeDatabase === 'live' && <AccountStrip accounts={accounts} activeId={activeAccountId} setActiveId={setActiveAccountId} trades={trades} legacyCount={legacyCount} onManage={() => setActiveTab('accounts')} />}
+
+                {activeTab === 'overview' && activeDatabase === 'live' && <AccountGuard account={accounts.find(a => a.id === activeAccountId) || accounts[0]} trades={trades} />}
+
+                {activeTab === 'accounts' && (
+                    <AccountsPanel accounts={accounts} onSave={saveAccount} onDelete={deleteAccount} activeId={activeAccountId} trades={trades} isLive={activeDatabase === 'live'} />
+                )}
 
                 {activeTab === 'overview' && (<>
                 {/* KPI Cards Grid */}
@@ -2873,6 +3211,19 @@ ${languageInstruction} Structure it as follows:
                         </div>
 
                         <form onSubmit={handleSaveNewTrade} noValidate className="space-y-4 text-xs">
+                            {activeDatabase === 'live' && (
+                                <div>
+                                    <label className="block font-bold mb-1 text-slate-400">ACCOUNT <span className="text-rose-400">*</span></label>
+                                    {accounts.length === 0 ? (
+                                        <div className="p-3 rounded-xl border text-xs font-bold bg-amber-500/10 border-amber-500/30 text-amber-300">No accounts yet. Create one in the Accounts tab first.</div>
+                                    ) : (
+                                        <select value={resolveAccountId()} onChange={(e) => setNewTradeForm({ ...newTradeForm, accountId: e.target.value })} className="w-full px-3 py-3 rounded-xl border bg-[#141B30] border-[#232C45] text-slate-200 font-bold">
+                                            <option value="">Select account…</option>
+                                            {accounts.map(a => <option key={a.id} value={a.id}>{a.name} · {a.firm || a.type} · {a.phase}</option>)}
+                                        </select>
+                                    )}
+                                </div>
+                            )}
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
                                     <label className="block font-bold mb-1 text-slate-400">DATE</label>

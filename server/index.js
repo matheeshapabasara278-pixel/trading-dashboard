@@ -61,6 +61,7 @@ const ensureDb = async (req, res, next) => {
 const tradeSchema = new mongoose.Schema(
   {
     databaseType: { type: String, enum: ['live', 'backtest'], default: 'live', index: true },
+    accountId: { type: String, default: '', index: true }, // funded account this trade belongs to (live trades)
     date: { type: String, required: true }, // 'YYYY-MM-DD'
     pairDirection: { type: String, required: true },
     session: { type: String, default: '' },
@@ -85,6 +86,42 @@ const tradeSchema = new mongoose.Schema(
 );
 
 const Trade = mongoose.models.Trade || mongoose.model('Trade', tradeSchema);
+
+// ---------------------------------------------------------------------------
+// Funded account model (rules + payouts); trades reference it through accountId
+// ---------------------------------------------------------------------------
+const accountSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    firm: { type: String, default: '' },
+    type: { type: String, default: 'Challenge' }, // Challenge | Instant | Funded
+    phase: { type: String, default: 'Phase 1' },
+    status: { type: String, default: 'Active' }, // Active | Passed | Breached
+    startBalance: { type: Number, required: true },
+    startDate: { type: String, default: '' },
+    endDate: { type: String, default: '' },
+    dailyLossPct: { type: Number, default: 5 },
+    maxDDPct: { type: Number, default: 10 },
+    ddType: { type: String, default: 'static' }, // static | trailing | locked
+    targetPct: { type: Number, default: 0 },
+    minDays: { type: Number, default: 0 },
+    consistencyPct: { type: Number, default: 0 },
+    profitSplit: { type: Number, default: 80 },
+    fee: { type: Number, default: 0 },
+    color: { type: String, default: '#6366F1' },
+    payouts: [{ date: String, amount: Number }]
+  },
+  { timestamps: true }
+);
+const Account = mongoose.models.Account || mongoose.model('Account', accountSchema);
+
+const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color'];
+const pickAccount = (b = {}) => {
+  const out = {};
+  ACCOUNT_KEYS.forEach((k) => { if (b[k] !== undefined) out[k] = b[k]; });
+  if (Array.isArray(b.payouts)) out.payouts = b.payouts.map((p) => ({ date: String(p.date || ''), amount: Number(p.amount) || 0 }));
+  return out;
+};
 
 // ---------------------------------------------------------------------------
 // Multer (memory storage -> buffer is streamed straight to Cloudinary)
@@ -191,6 +228,9 @@ app.post('/api/trades/add', handleUpload, ensureDb, async (req, res) => {
     if (!b.pairDirection) {
       return res.status(400).json({ success: false, error: 'Pair & Direction is required.' });
     }
+    if (databaseType === 'live' && !String(b.accountId || '').trim()) {
+      return res.status(400).json({ success: false, error: 'Account is required for live trades.' });
+    }
 
     const beforeFiles = (req.files && req.files.beforeChart) || [];
     const afterFiles = (req.files && req.files.afterChart) || [];
@@ -214,6 +254,7 @@ app.post('/api/trades/add', handleUpload, ensureDb, async (req, res) => {
 
     const trade = await Trade.create({
       databaseType,
+      accountId: String(b.accountId || '').trim(),
       date: normalizeDate(b.date),
       pairDirection: b.pairDirection,
       session: b.session || '',
@@ -251,7 +292,7 @@ app.patch('/api/trades/:id', handleUpload, ensureDb, async (req, res) => {
 
     const b = req.body || {};
     const update = {};
-    ['pairDirection', 'session', 'fvgTap', 'smtDivergence', 'planeTarget', 'outcome', 'note'].forEach((k) => {
+    ['pairDirection', 'session', 'fvgTap', 'smtDivergence', 'planeTarget', 'outcome', 'note', 'accountId'].forEach((k) => {
       if (b[k] !== undefined) update[k] = String(b[k]);
     });
     if (b.date) update.date = normalizeDate(b.date);
@@ -322,6 +363,53 @@ app.delete('/api/trades/:id', ensureDb, async (req, res) => {
     res.json({ success: true, id });
   } catch (error) {
     console.error('Delete Trade Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Account routes
+// ---------------------------------------------------------------------------
+app.get('/api/accounts', ensureDb, async (req, res) => {
+  try {
+    res.json(await Account.find().sort({ createdAt: 1 }).lean());
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/accounts', ensureDb, async (req, res) => {
+  try {
+    const account = await Account.create(pickAccount(req.body));
+    res.status(201).json({ success: true, data: account });
+  } catch (error) {
+    res.status(error.name === 'ValidationError' ? 400 : 500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch('/api/accounts/:id', ensureDb, async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) return res.status(400).json({ success: false, error: 'Invalid account id.' });
+    const account = await Account.findByIdAndUpdate(req.params.id, { $set: pickAccount(req.body) }, { new: true, runValidators: true }).lean();
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found.' });
+    res.json({ success: true, data: account });
+  } catch (error) {
+    res.status(error.name === 'ValidationError' ? 400 : 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/accounts/:id', ensureDb, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ success: false, error: 'Invalid account id.' });
+    const tradeCount = await Trade.countDocuments({ accountId: id });
+    if (tradeCount > 0) {
+      return res.status(409).json({ success: false, error: `This account still has ${tradeCount} trade(s). Move or delete them first.` });
+    }
+    const removed = await Account.findByIdAndDelete(id);
+    if (!removed) return res.status(404).json({ success: false, error: 'Account not found.' });
+    res.json({ success: true, id });
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });

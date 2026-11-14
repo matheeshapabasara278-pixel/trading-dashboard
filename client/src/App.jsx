@@ -25,10 +25,11 @@ const getDefaultTradeForm = () => ({
     note: ''
 });
 
-// Always show prices with 5 decimals (1.3 -> 1.30000). Returns '' for empty / invalid input
-const formatPrice5 = (value) => {
+// Prices are shown with 5 decimals (1.3 -> 1.30000); gold (XAU) uses 2 decimals (4155.4 -> 4155.40). Returns '' for empty / invalid input
+const isGoldPair = (pairDirection) => String(pairDirection || '').toUpperCase().includes('XAU');
+const formatPrice5 = (value, pairDirection) => {
     const num = parseFloat(value);
-    return Number.isFinite(num) ? num.toFixed(5) : '';
+    return Number.isFinite(num) ? num.toFixed(isGoldPair(pairDirection) ? 2 : 5) : '';
 };
 
 // Counts image links typed in the URL box (separated by comma or new line)
@@ -270,6 +271,7 @@ function DrawdownChart({ series, isDark }) {
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
 
 const ICONS = {
+    shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z',
     edit: 'M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z',
     trash: 'M3 6h18M8 6V4h8v2m-9 0l1 14h8l1-14M10 11v6M14 11v6',
     left: 'M15 18l-6-6 6-6', right: 'M9 18l6-6-6-6', x: 'M18 6L6 18M6 6l12 12', check: 'M20 6L9 17l-5-5',
@@ -395,7 +397,17 @@ function Meter({ title, main, sub, ratio, color }) {
     );
 }
 
-function AccountsPanel({ accounts, onSave, onDelete, activeId, trades, isLive }) {
+const SectionHead = ({ title, sub, right }) => (
+    <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+        <div>
+            <h3 className="text-sm font-black text-white">{title}</h3>
+            {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
+        </div>
+        {right}
+    </div>
+);
+
+function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades, isLive }) {
     const [form, setForm] = useState(null); // null = closed
     const [payout, setPayout] = useState({ date: todayKey(), amount: '' });
     const acc = accounts.find(a => a.id === activeId) || (activeId === '__legacy' ? null : accounts[0]);
@@ -417,42 +429,48 @@ function AccountsPanel({ accounts, onSave, onDelete, activeId, trades, isLive })
         setPayout({ date: todayKey(), amount: '' });
     };
 
+    const sumPayouts = (a) => (a.payouts || []).reduce((s, p) => s + p.amount, 0);
     const totalFees = accounts.reduce((s, a) => s + (Number(a.fee) || 0), 0);
-    const totalPayouts = accounts.reduce((s, a) => s + (a.payouts || []).reduce((x, p) => x + p.amount, 0), 0);
+    const totalPayouts = accounts.reduce((s, a) => s + sumPayouts(a), 0);
     const h = m ? HEALTH[m.health] : null;
+    const netCls = (v) => v >= 0 ? 'text-emerald-400' : 'text-rose-400';
+    const card = 'p-5 rounded-2xl border bg-[#0E1426] border-[#232C45]';
+    const lbl = 'text-[10px] font-extrabold uppercase tracking-widest text-slate-400';
 
     return (
-        <div className="space-y-5">
-            {!isLive && <div className="p-4 rounded-2xl border text-xs font-bold bg-amber-500/10 border-amber-500/30 text-amber-300">You are viewing the Backtest data. Switch to Live to see funded-account metrics.</div>}
-
-            <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-black text-white">Account details</div>
-                <button onClick={() => setForm({ ...ACC_EMPTY })} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ New account</button>
-            </div>
+        <div className="space-y-10">
+            {!isLive && <div className="p-4 rounded-2xl border text-xs font-bold bg-amber-500/10 border-amber-500/30 text-amber-300">You are viewing the Backtest data. Switch to Forward Test to see funded-account metrics.</div>}
 
             {form && (
-                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4">
-                    <div className="text-sm font-black text-white">{form.id ? 'Edit account' : 'New funded account'}</div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-                        {ACC_FIELDS.map(([k, label, type]) => (
-                            <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}</span>
-                                <input type={type} value={form[k] ?? ''} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput} />
-                            </label>
-                        ))}
-                        {[['type', 'Account type', ['Challenge', 'Instant', 'Funded']], ['phase', 'Phase', ['Phase 1', 'Phase 2', 'Funded']], ['ddType', 'Drawdown type', ['static', 'trailing', 'locked']], ['status', 'Status', ['Active', 'Passed', 'Breached']]].map(([k, label, opts]) => (
-                            <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}{k === 'ddType' ? ' (locked = trails, stops at start balance)' : ''}</span>
-                                <select value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput}>{opts.map(o => <option key={o} value={o}>{o}</option>)}</select>
-                            </label>
-                        ))}
+                <section>
+                    <SectionHead title={form.id ? 'Edit account' : 'New funded account'} sub="Enter the rules from your firm so MintPip can track the limits for you." />
+                    <div className={`${card} space-y-4`}>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                            {ACC_FIELDS.map(([k, label, type]) => (
+                                <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}</span>
+                                    <input type={type} value={form[k] ?? ''} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput} />
+                                </label>
+                            ))}
+                            {[['type', 'Account type', ['Challenge', 'Instant', 'Funded']], ['phase', 'Phase', ['Phase 1', 'Phase 2', 'Funded']], ['ddType', 'Drawdown type', ['static', 'trailing', 'locked']], ['status', 'Status', ['Active', 'Passed', 'Breached']]].map(([k, label, opts]) => (
+                                <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}{k === 'ddType' ? ' (locked = trails, stops at start balance)' : ''}</span>
+                                    <select value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput}>{opts.map(o => <option key={o} value={o}>{o}</option>)}</select>
+                                </label>
+                            ))}
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={save} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Save account</button>
+                            <button onClick={() => setForm(null)} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-slate-800 text-white">Cancel</button>
+                        </div>
                     </div>
-                    <div className="flex gap-2">
-                        <button onClick={save} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Save account</button>
-                        <button onClick={() => setForm(null)} className="px-5 py-2.5 rounded-xl text-xs font-bold bg-slate-800 text-white">Cancel</button>
-                    </div>
-                </div>
+                </section>
             )}
 
-            {!acc && !form && accounts.length > 0 && <p className="text-xs text-slate-400">Pick an account in the bar above to see its rules, meters and payouts.</p>}
+            {!acc && !form && accounts.length > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-xs text-slate-400">Pick an account from the dropdown above to see its rules, limits and payouts.</p>
+                    <button onClick={() => setForm({ ...ACC_EMPTY })} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ New account</button>
+                </div>
+            )}
 
             {!acc && !form && accounts.length === 0 && (
                 <div className="p-10 rounded-2xl border text-center bg-[#0E1426] border-[#232C45]">
@@ -463,112 +481,377 @@ function AccountsPanel({ accounts, onSave, onDelete, activeId, trades, isLive })
             )}
 
             {acc && m && (<>
-                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                        <div className="text-lg font-black text-white">{acc.name}</div>
-                        <div className="text-xs text-slate-400 mt-1">{acc.firm || 'No firm set'} · {acc.type} · {acc.phase} · {acc.status} · since {acc.startDate}</div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span>
-                        <button onClick={() => setForm({ ...acc })} className="px-3 py-2 rounded-xl text-xs font-bold bg-[#141B30] border border-[#232C45] text-slate-300"><Ico n="edit" /> Edit</button>
-                        <button onClick={remove} className="px-3 py-2 rounded-xl text-xs font-bold bg-rose-500/10 border border-rose-500/30 text-rose-400"><Ico n="trash" /> Delete</button>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                    <Meter title="Daily loss" main={`${fm(m.dailyUsed)} / ${fm(m.dailyLimit)}`} ratio={m.dailyRatio} color={m.dailyRatio >= 0.75 ? '#F43F5E' : m.dailyRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
-                        sub={`${fm(Math.max(0, m.dailyLeft))} left today · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`} />
-                    <Meter title={`Max drawdown (${acc.ddType})`} main={`${fm(Math.max(0, m.ddLeft))} left`} ratio={Math.max(0, m.ddRatio)} color={m.ddRatio >= 0.75 ? '#F43F5E' : m.ddRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
-                        sub={`Floor ${fm(m.floor)} · balance ${fm(m.bal)}`} />
-                    <Meter title="Profit target" main={m.target ? `${m.targetProgress.toFixed(0)}%` : 'No target'} ratio={m.targetProgress / 100} color="#6366F1"
-                        sub={m.target ? `${fm(m.profit)} of ${fm(m.target)}` : `Profit ${fm(m.profit)}`} />
-                    <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45]">
-                        <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">Rules check</div>
-                        <div className="mt-2 space-y-2 text-xs text-slate-300">
-                            <div className="flex justify-between"><span>Trading days</span><b className={Number(acc.minDays) && m.days < Number(acc.minDays) ? 'text-amber-400' : 'text-emerald-400'}>{m.days}{Number(acc.minDays) ? ` / ${acc.minDays}` : ''}</b></div>
-                            {Number(acc.consistencyPct) > 0 ? (
-                                <div className="flex justify-between"><span>Best day / profit</span><b className={m.consPct > Number(acc.consistencyPct) ? 'text-rose-400' : 'text-emerald-400'}>{m.consPct.toFixed(0)}% (max {acc.consistencyPct}%)</b></div>
-                            ) : <div className="flex justify-between"><span>Consistency rule</span><b className="text-slate-400">Off</b></div>}
-                            <div className="flex justify-between"><span>Best day</span><b className="text-white">{fm(m.bestDay)}</b></div>
-                            <div className="flex justify-between"><span>Peak balance</span><b className="text-white">{fm(m.peak)}</b></div>
+                {/* 1. Who is this account */}
+                <section>
+                    <SectionHead title="Account details" sub="Identity and current status"
+                        right={<button onClick={() => setForm({ ...ACC_EMPTY })} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ New account</button>} />
+                    <div className={`${card} flex flex-wrap items-center justify-between gap-4`} style={{ borderLeft: `3px solid ${acc.color || '#6366F1'}` }}>
+                        <div>
+                            <div className="text-lg font-black text-white">{acc.name}</div>
+                            <div className="text-xs text-slate-400 mt-1">{acc.firm || 'No firm set'} · {acc.type} · {acc.phase} · {acc.status} · since {acc.startDate}</div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span>
+                            <button onClick={() => setForm({ ...acc })} className="px-3 py-2 rounded-xl text-xs font-bold bg-[#141B30] border border-[#232C45] text-slate-300"><Ico n="edit" /> Edit</button>
+                            <button onClick={remove} className="px-3 py-2 rounded-xl text-xs font-bold bg-rose-500/10 border border-rose-500/30 text-rose-400"><Ico n="trash" /> Delete</button>
                         </div>
                     </div>
-                </div>
+                </section>
 
-                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4">
-                    <div className="text-sm font-black text-white">Payouts &amp; fees</div>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-                        <div><div className="text-slate-400 font-bold">This account — fee</div><div className="text-white font-black text-lg">{fm(Number(acc.fee) || 0)}</div></div>
-                        <div><div className="text-slate-400 font-bold">This account — payouts</div><div className="text-emerald-400 font-black text-lg">{fm((acc.payouts || []).reduce((s, p) => s + p.amount, 0))}</div></div>
-                        <div><div className="text-slate-400 font-bold">All accounts — fees paid</div><div className="text-white font-black text-lg">{fm(totalFees)}</div></div>
-                        <div><div className="text-slate-400 font-bold">All accounts — net (payouts − fees)</div><div className={`font-black text-lg ${totalPayouts - totalFees >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fm(totalPayouts - totalFees)}</div></div>
-                    </div>
-                    <div className="flex flex-wrap items-end gap-2">
-                        <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Payout date</span><input type="date" value={payout.date} onChange={(e) => setPayout({ ...payout, date: e.target.value })} className={accInput} /></label>
-                        <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Amount received ($)</span><input type="number" value={payout.amount} onChange={(e) => setPayout({ ...payout, amount: e.target.value })} className={accInput} /></label>
-                        <button onClick={addPayout} className="px-4 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Add payout</button>
-                    </div>
-                    {(acc.payouts || []).length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                            {acc.payouts.map(p => (
-                                <span key={p.id} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-bold bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
-                                    {p.date} · {fm(p.amount)}
-                                    <button onClick={() => onSave({ ...acc, payouts: acc.payouts.filter(x => x.id !== p.id) })} className="opacity-70 hover:opacity-100"><Ico n="x" className="w-3 h-3" /></button>
-                                </span>
-                            ))}
+                {/* 2. Limits and rules */}
+                <section>
+                    <SectionHead title="Limits & progress" sub="How much room is left under this account's rules" />
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                        <Meter title="Daily loss" main={`${fm(m.dailyUsed)} / ${fm(m.dailyLimit)}`} ratio={m.dailyRatio} color={m.dailyRatio >= 0.75 ? '#F43F5E' : m.dailyRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                            sub={`${fm(Math.max(0, m.dailyLeft))} left today · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`} />
+                        <Meter title={`Max drawdown (${acc.ddType})`} main={`${fm(Math.max(0, m.ddLeft))} left`} ratio={Math.max(0, m.ddRatio)} color={m.ddRatio >= 0.75 ? '#F43F5E' : m.ddRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                            sub={`Floor ${fm(m.floor)} · balance ${fm(m.bal)}`} />
+                        <Meter title="Profit target" main={m.target ? `${m.targetProgress.toFixed(0)}%` : 'No target'} ratio={m.targetProgress / 100} color="#6366F1"
+                            sub={m.target ? `${fm(m.profit)} of ${fm(m.target)}` : `Profit ${fm(m.profit)}`} />
+                        <div className={card}>
+                            <div className={lbl}>Rules check</div>
+                            <div className="mt-3 space-y-2.5 text-xs text-slate-300">
+                                <div className="flex justify-between"><span>Trading days</span><b className={Number(acc.minDays) && m.days < Number(acc.minDays) ? 'text-amber-400' : 'text-emerald-400'}>{m.days}{Number(acc.minDays) ? ` / ${acc.minDays}` : ''}</b></div>
+                                {Number(acc.consistencyPct) > 0 ? (
+                                    <div className="flex justify-between"><span>Best day / profit</span><b className={m.consPct > Number(acc.consistencyPct) ? 'text-rose-400' : 'text-emerald-400'}>{m.consPct.toFixed(0)}% (max {acc.consistencyPct}%)</b></div>
+                                ) : <div className="flex justify-between"><span>Consistency rule</span><b className="text-slate-400">Off</b></div>}
+                                <div className="flex justify-between"><span>Best day</span><b className="text-white">{fm(m.bestDay)}</b></div>
+                                <div className="flex justify-between"><span>Peak balance</span><b className="text-white">{fm(m.peak)}</b></div>
+                            </div>
                         </div>
-                    )}
-                </div>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed mt-3">
+                        Only closed trades saved against this account are counted, so floating loss is not included. Treat these meters as a guide and rely on your firm's own dashboard for the official limits.
+                    </p>
+                </section>
 
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Only the trades you saved against this account are counted, and only closed trades, so floating loss is not included. Treat these meters as a guide and rely on your firm's own dashboard for the official limits. 
-                </p>
+                {/* 3. Payouts for THIS account */}
+                <section>
+                    <SectionHead title="Payouts" sub={`Fee and payouts for ${acc.name} only`} />
+                    <div className={`${card} space-y-5`}>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div><div className={lbl}>Challenge fee</div><div className="text-white font-black text-xl mt-1">{fm(Number(acc.fee) || 0)}</div></div>
+                            <div><div className={lbl}>Payouts received</div><div className="text-emerald-400 font-black text-xl mt-1">{fm(sumPayouts(acc))}</div></div>
+                            <div><div className={lbl}>Net for this account</div><div className={`font-black text-xl mt-1 ${netCls(sumPayouts(acc) - (Number(acc.fee) || 0))}`}>{fm(sumPayouts(acc) - (Number(acc.fee) || 0))}</div></div>
+                        </div>
+                        <div className="pt-5 border-t border-[#232C45]">
+                            <div className="text-xs font-bold text-white mb-3">Record a payout</div>
+                            <div className="flex flex-wrap items-end gap-2">
+                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Payout date</span><input type="date" value={payout.date} onChange={(e) => setPayout({ ...payout, date: e.target.value })} className={accInput} /></label>
+                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Amount received ($)</span><input type="number" value={payout.amount} onChange={(e) => setPayout({ ...payout, amount: e.target.value })} className={accInput} /></label>
+                                <button onClick={addPayout} className="px-4 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Add payout</button>
+                            </div>
+                            {(acc.payouts || []).length > 0 && (
+                                <div className="flex flex-wrap gap-2 mt-4">
+                                    {acc.payouts.map(p => (
+                                        <span key={p.id} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-bold bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
+                                            {p.date} · {fm(p.amount)}
+                                            <button onClick={() => onSave({ ...acc, payouts: acc.payouts.filter(x => x.id !== p.id) })} className="opacity-70 hover:opacity-100" aria-label="Remove payout"><Ico n="x" className="w-3 h-3" /></button>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </section>
+
+                {/* 4. Portfolio-wide totals, kept apart from the selected account */}
+                <section>
+                    <SectionHead title="All accounts" sub="Fees and payouts across every account. Click a row to switch to it." />
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                        <div className={card}><div className={lbl}>Fees paid</div><div className="text-white font-black text-xl mt-1">{fm(totalFees)}</div></div>
+                        <div className={card}><div className={lbl}>Payouts received</div><div className="text-emerald-400 font-black text-xl mt-1">{fm(totalPayouts)}</div></div>
+                        <div className={card}><div className={lbl}>Net (payouts − fees)</div><div className={`font-black text-xl mt-1 ${netCls(totalPayouts - totalFees)}`}>{fm(totalPayouts - totalFees)}</div></div>
+                    </div>
+                    <div className="rounded-2xl border bg-[#0E1426] border-[#232C45] overflow-x-auto">
+                        <table className="w-full text-xs min-w-[520px]">
+                            <thead>
+                                <tr className="text-left text-slate-400">
+                                    <th className="px-5 py-3 font-bold">Account</th>
+                                    <th className="px-3 py-3 font-bold">Status</th>
+                                    <th className="px-3 py-3 font-bold text-right">Fee</th>
+                                    <th className="px-3 py-3 font-bold text-right">Payouts</th>
+                                    <th className="px-5 py-3 font-bold text-right">Net</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {accounts.map(a => {
+                                    const pay = sumPayouts(a), fee = Number(a.fee) || 0;
+                                    return (
+                                        <tr key={a.id} onClick={() => onSelect && onSelect(a.id)} className={`cursor-pointer border-t border-[#232C45] transition ${a.id === acc.id ? 'bg-indigo-500/10' : 'hover:bg-white/5'}`}>
+                                            <td className="px-5 py-3">
+                                                <span className="inline-flex items-center gap-2 font-bold text-white"><i style={{ width: 8, height: 8, borderRadius: 99, background: a.color || '#6366F1', display: 'inline-block' }}></i>{a.name}</span>
+                                                <span className="text-slate-400"> · {a.type}</span>
+                                            </td>
+                                            <td className="px-3 py-3 text-slate-300">{a.status}</td>
+                                            <td className="px-3 py-3 text-right text-slate-300">{fm(fee)}</td>
+                                            <td className="px-3 py-3 text-right text-emerald-400 font-bold">{fm(pay)}</td>
+                                            <td className={`px-5 py-3 text-right font-black ${netCls(pay - fee)}`}>{fm(pay - fee)}</td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
             </>)}
         </div>
     );
 }
 
-function AccountStrip({ accounts, activeId, setActiveId, trades, legacyCount, onManage }) {
-    if (accounts.length === 0) {
-        return (
-            <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border bg-[#0E1426] border-[#232C45]">
-                <span className="text-xs font-bold text-slate-300">No funded account yet. Create one so every trade is tracked against its own rules.</span>
-                <button onClick={onManage} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Create account</button>
-            </div>
-        );
+// ---------------------------------------------------------------------------
+// Per-account risk rules (Analytics tab). Each funded account carries its own limits;
+// Backtest / unassigned trades fall back to one browser-saved rule set.
+// ---------------------------------------------------------------------------
+const effectiveRisk = (acc, g) => {
+    if (acc) {
+        const B0 = toNum(acc.startBalance);
+        return {
+            startBal: B0,
+            dailyLimit: B0 * toNum(acc.dailyLossPct) / 100,
+            weeklyLimit: B0 * toNum(acc.weeklyLossPct) / 100,
+            ddLimit: B0 * toNum(acc.maxDDPct) / 100,
+            riskPct: toNum(acc.riskTargetPct),
+            maxStreak: toNum(acc.maxLossStreak)
+        };
     }
-    const acc = accounts.find(a => a.id === activeId);
-    const m = acc ? computeAccount(acc, trades) : null;
-    const h = m ? HEALTH[m.health] : null;
-    const stat = (label, value, cls = 'text-white') => (
-        <div className="min-w-[110px]"><div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">{label}</div><div className={`text-sm font-black mt-1 ${cls}`}>{value}</div></div>
-    );
+    return {
+        startBal: toNum(g.startingBalance), dailyLimit: toNum(g.dailyLossLimit), weeklyLimit: toNum(g.weeklyLossLimit),
+        ddLimit: 0, riskPct: toNum(g.riskTargetPct), maxStreak: toNum(g.maxLossStreak)
+    };
+};
+
+const RISK_FIELDS_ACC = [
+    ['startBalance', 'Starting balance ($)', 'e.g. 10000'],
+    ['dailyLossPct', 'Daily loss limit (% of start)', 'e.g. 5'],
+    ['weeklyLossPct', 'Weekly loss limit (% of start)', 'e.g. 8'],
+    ['maxDDPct', 'Max drawdown (% of start)', 'e.g. 10'],
+    ['riskTargetPct', 'Risk per trade (% of start)', 'e.g. 1'],
+    ['maxLossStreak', 'Warn after N losses in a row', 'e.g. 3']
+];
+const RISK_FIELDS_GLOBAL = [
+    ['startingBalance', 'Starting balance ($)', 'e.g. 10000'],
+    ['dailyLossLimit', 'Daily loss limit ($)', 'e.g. 300'],
+    ['weeklyLossLimit', 'Weekly loss limit ($)', 'e.g. 600'],
+    ['riskTargetPct', 'Risk per trade (% of start)', 'e.g. 1'],
+    ['maxLossStreak', 'Warn after N losses in a row', 'e.g. 3']
+];
+
+function RuleGauge({ label, value, limit, ratio, sub, invert }) {
+    const off = !(limit > 0);
+    const r = Math.max(0, Math.min(1, ratio || 0));
+    const color = off ? '#475569' : r >= 1 ? '#F43F5E' : r >= 0.75 ? '#F97316' : r >= 0.5 ? '#F59E0B' : '#34D399';
     return (
-        <div className="p-4 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-3" style={acc ? { borderTop: `3px solid ${acc.color || '#6366F1'}` } : undefined}>
-            <div className="flex flex-wrap items-center gap-2">
-                {accounts.map(a => (
-                    <button key={a.id} onClick={() => setActiveId(a.id)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border ${a.id === activeId ? 'bg-indigo-500/15 border-indigo-500/50 text-indigo-300' : 'bg-[#141B30] border-[#232C45] text-slate-300'}`}>
-                        <i style={{ width: 8, height: 8, borderRadius: 99, background: a.color || '#6366F1', display: 'inline-block' }}></i>{a.name}<span className="opacity-60">{a.type}</span>
-                    </button>
-                ))}
-                {legacyCount > 0 && <button onClick={() => setActiveId('__legacy')} className={`px-4 py-2 rounded-xl text-xs font-bold border ${activeId === '__legacy' ? 'bg-indigo-500/15 border-indigo-500/50 text-indigo-300' : 'bg-[#141B30] border-[#232C45] text-slate-300'}`}>Unassigned <span className="opacity-60">({legacyCount})</span></button>}
-                <button onClick={onManage} className="px-3 py-2 rounded-xl text-xs font-bold bg-[#141B30] border border-[#232C45] text-slate-300">Manage accounts</button>
+        <div className="p-4 rounded-xl border bg-[#0B1020]/70 border-[#232C45] min-w-0">
+            <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">{label}</div>
+            <div className="mt-2 text-sm font-black text-white truncate">{off ? <span className="text-slate-500 font-bold">Not set</span> : value}</div>
+            <div className="h-1.5 rounded-full mt-2.5 overflow-hidden" style={{ background: 'rgba(148,163,184,0.16)' }}>
+                <div className="h-full rounded-full" style={{ width: `${off ? 0 : r * 100}%`, background: color, transition: 'width .8s cubic-bezier(.22,1,.36,1)' }}></div>
             </div>
-            {acc && m ? (
-                <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
-                    <div className="min-w-[170px]"><div className="text-sm font-black text-white">{acc.name}</div><div className="text-[11px] text-slate-400 mt-1">{acc.firm || '—'} · {acc.type} · {acc.phase}</div></div>
-                    {stat('Balance', fm(m.bal))}
-                    {stat('Net PnL', `${m.profit >= 0 ? '+' : ''}${fm(m.profit)}`, m.profit >= 0 ? 'text-emerald-400' : 'text-rose-400')}
-                    {stat('Today', `${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`, m.todayPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}
-                    {stat('Daily loss left', fm(Math.max(0, m.dailyLeft)))}
-                    {stat('Drawdown room', fm(Math.max(0, m.ddLeft)))}
-                    {m.target ? stat('Target', `${m.targetProgress.toFixed(0)}%`) : null}
-                    <div className="self-center"><span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span></div>
-                </div>
-            ) : activeId === '__legacy' ? <div className="text-xs text-slate-400">Showing older trades that were saved before accounts existed. Edit a trade to assign it to an account.</div> : null}
+            <div className="text-[11px] mt-2 text-slate-500 truncate">{off ? 'Open "Edit rules" to enable' : sub}</div>
         </div>
     );
 }
+
+function RiskRulesPanel({ acc, global, risk, trades, analytics, isLive, onSaveAccount, onSaveGlobal }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState({});
+    const fields = acc ? RISK_FIELDS_ACC : RISK_FIELDS_GLOBAL;
+    useEffect(() => { setEditing(false); }, [acc ? acc.id : 'global']); // switching account closes the editor
+
+    const startEdit = () => { const src = acc || global; const d = {}; fields.forEach(([k]) => { d[k] = src[k] ?? ''; }); setDraft(d); setEditing(true); };
+    const save = async () => {
+        if (acc) {
+            if (!(toNum(draft.startBalance) > 0)) { alert('Starting balance must be greater than 0.'); return; }
+            const body = { ...acc };
+            fields.forEach(([k]) => { body[k] = draft[k] === '' ? 0 : Number(draft[k]); });
+            await onSaveAccount(body);
+        } else {
+            onSaveGlobal({ ...global, ...draft });
+        }
+        setEditing(false);
+    };
+
+    // live usage
+    const todayK = localDateKey(), weekK = getWeekStartKey();
+    const todayPnl = trades.filter(t => tradeDateKey(t) === todayK).reduce((x, t) => x + t.pnl, 0);
+    const weekPnl = trades.filter(t => tradeDateKey(t) >= weekK).reduce((x, t) => x + t.pnl, 0);
+    const m = acc ? computeAccount(acc, trades) : null;
+    const dailyUsed = Math.max(0, -todayPnl), weeklyUsed = Math.max(0, -weekPnl);
+    const lossStreak = analytics.streakType === 'Loss' ? analytics.streakLen : 0;
+    const avgLossPct = risk.startBal > 0 ? analytics.avgLoss / risk.startBal * 100 : 0;
+    const accent = acc ? (acc.color || '#6366F1') : '#8B5CF6';
+    const inp = 'w-full px-3 py-2 rounded-xl border text-sm font-bold bg-[#141B30] border-[#232C45] text-white focus:outline-none focus:border-indigo-500/60';
+
+    return (
+        <div className="rounded-2xl border bg-[#141B30]/60 border-[#232C45] overflow-hidden" style={{ borderLeft: `3px solid ${accent}` }}>
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                <div className="min-w-0">
+                    <div className="text-sm font-black text-white flex items-center gap-2">
+                        <Ico n="shield" className="w-4 h-4 text-slate-400" />
+                        Risk rules{acc ? <span className="text-slate-400 font-bold"> · {acc.name}</span> : <span className="text-slate-400 font-bold"> · {isLive ? 'Unassigned trades' : 'Backtest'}</span>}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                        {acc ? 'Limits belong to this account only and are saved with it.' : 'Shared rule set for trades without a funded account. Saved in this browser.'}
+                    </div>
+                </div>
+                {!editing
+                    ? <button onClick={startEdit} className="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#0E1426] border border-[#232C45] text-slate-200 hover:bg-[#19223A] transition"><Ico n="edit" /> Edit rules</button>
+                    : <div className="flex gap-2">
+                        <button onClick={() => setEditing(false)} className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700 transition">Cancel</button>
+                        <button onClick={save} className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition">Save rules</button>
+                    </div>}
+            </div>
+
+            {editing ? (
+                <div className="px-5 pb-5 border-t border-[#232C45]/70 pt-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {fields.map(([k, label, ph]) => (
+                            <label key={k} className="block text-xs">
+                                <span className="block font-bold mb-1 text-slate-400">{label}</span>
+                                <input type="number" min="0" step="any" placeholder={ph} value={draft[k] ?? ''} onChange={(e) => setDraft(d => ({ ...d, [k]: e.target.value }))} className={inp} />
+                            </label>
+                        ))}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-3">Leave a field empty or 0 to turn that rule off.{acc ? ' Percentages are calculated from this account\'s starting balance.' : ''}</p>
+                </div>
+            ) : (
+                <div className="px-5 pb-5 grid grid-cols-2 lg:grid-cols-5 gap-3">
+                    <RuleGauge label="Daily loss" limit={risk.dailyLimit} value={`${fmtMoney(dailyUsed)} / ${fmtMoney(risk.dailyLimit)}`}
+                        ratio={risk.dailyLimit ? dailyUsed / risk.dailyLimit : 0} sub={`${fmtMoney(Math.max(0, risk.dailyLimit - dailyUsed))} left today`} />
+                    <RuleGauge label="Weekly loss" limit={risk.weeklyLimit} value={`${fmtMoney(weeklyUsed)} / ${fmtMoney(risk.weeklyLimit)}`}
+                        ratio={risk.weeklyLimit ? weeklyUsed / risk.weeklyLimit : 0} sub={`${fmtMoney(Math.max(0, risk.weeklyLimit - weeklyUsed))} left this week`} />
+                    {acc
+                        ? <RuleGauge label={`Max drawdown (${acc.ddType})`} limit={risk.ddLimit} value={`${fmtMoney(Math.max(0, m.ddLeft))} left`}
+                            ratio={m.ddRatio} sub={`Floor ${fmtMoney(m.floor)} · balance ${fmtMoney(m.bal)}`} />
+                        : <RuleGauge label="Max drawdown" limit={0} value="" ratio={0} sub="" />}
+                    <RuleGauge label="Risk per trade" limit={risk.riskPct} value={`${avgLossPct.toFixed(2)}% avg loss / ${risk.riskPct}%`}
+                        ratio={risk.riskPct ? avgLossPct / risk.riskPct : 0} sub="Average losing trade vs your target" />
+                    <RuleGauge label="Loss streak alert" limit={risk.maxStreak} value={`${lossStreak} / ${risk.maxStreak} losses`}
+                        ratio={risk.maxStreak ? lossStreak / risk.maxStreak : 0} sub={lossStreak ? 'Current run of losses' : 'No active loss streak'} />
+                </div>
+            )}
+        </div>
+    );
+}
+
+
+const TAB_META = {
+    overview: ['Overview', 'Results and equity growth for the selected account'],
+    analytics: ['Analytics', 'Risk, drawdown and where your edge comes from'],
+    calendar: ['Calendar & Reports', 'Day-by-day results and reports'],
+    accounts: ['Accounts', 'Rules, limits and payouts for each funded account']
+};
+
+function AccountDropdown({ accounts, activeId, setActiveId, trades, legacyCount, onManage }) {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef(null);
+    useEffect(() => {
+        if (!open) return;
+        const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+        const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+        document.addEventListener('mousedown', onDown);
+        document.addEventListener('keydown', onKey);
+        return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+    }, [open]);
+
+    const acc = accounts.find(a => a.id === activeId);
+    const isLegacy = activeId === '__legacy';
+    const dot = (c) => <i style={{ width: 9, height: 9, borderRadius: 99, background: c, display: 'inline-block', flexShrink: 0 }}></i>;
+    const pick = (id) => { setActiveId(id); setOpen(false); };
+    const row = (id, color, title, sub) => (
+        <button key={id} type="button" role="option" aria-selected={id === activeId} onClick={() => pick(id)}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition ${id === activeId ? 'bg-indigo-500/15' : 'hover:bg-white/5'}`}>
+            {dot(color)}
+            <span className="flex-1 min-w-0">
+                <span className="block text-xs font-bold text-white truncate">{title}</span>
+                <span className="block text-[11px] text-slate-400 truncate">{sub}</span>
+            </span>
+            {id === activeId && <Ico n="check" className="w-4 h-4 text-indigo-400" />}
+        </button>
+    );
+
+    return (
+        <div className="relative" ref={wrapRef}>
+            <button type="button" onClick={() => setOpen(o => !o)} aria-haspopup="listbox" aria-expanded={open}
+                className="flex items-center gap-3 w-full sm:w-[300px] pl-3.5 pr-3 py-2.5 rounded-xl border bg-[#141B30] border-[#232C45] hover:border-indigo-500/50 transition text-left"
+                style={acc ? { borderLeft: `3px solid ${acc.color || '#6366F1'}` } : undefined}>
+                <span className="flex-1 min-w-0">
+                    <span className="block text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Account</span>
+                    <span className="block text-sm font-black text-white truncate">{isLegacy ? 'Unassigned trades' : acc ? acc.name : 'Select an account'}</span>
+                    <span className="block text-[11px] text-slate-400 truncate">{acc ? `${acc.firm || 'No firm set'} · ${acc.type}` : isLegacy ? `${legacyCount} older trades` : 'Choose which account to view'}</span>
+                </span>
+                <svg className={`w-4 h-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+            {open && (
+                <div role="listbox" className="absolute right-0 left-0 sm:left-auto sm:w-[340px] mt-2 z-40 rounded-xl border bg-[#0E1426] border-[#232C45] p-1.5 max-h-[70vh] overflow-y-auto" style={{ boxShadow: '0 24px 60px -12px rgba(0,0,0,.55)' }}>
+                    <div className="px-3 pt-2 pb-1.5 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Funded accounts</div>
+                    {accounts.map(a => row(a.id, a.color || '#6366F1', a.name, `${a.firm || 'No firm set'} · ${a.type} · ${a.status}`))}
+                    {legacyCount > 0 && (<>
+                        <div className="px-3 pt-3 pb-1.5 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Other</div>
+                        {row('__legacy', '#64748B', 'Unassigned trades', `${legacyCount} trades saved before accounts existed`)}
+                    </>)}
+                    <div className="mt-1.5 pt-1.5 border-t border-[#232C45]">
+                        <button type="button" onClick={() => { setOpen(false); onManage(); }} className="w-full px-3 py-2.5 rounded-lg text-left text-xs font-bold text-indigo-400 hover:bg-white/5 transition">Manage accounts</button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function PageToolbar({ tab, isLive, accounts, activeId, setActiveId, trades, legacyCount, onManage }) {
+    const [title, sub] = TAB_META[tab] || TAB_META.overview;
+    const hasAccounts = isLive && accounts.length > 0;
+    const acc = hasAccounts ? accounts.find(a => a.id === activeId) : null;
+    const m = acc ? computeAccount(acc, trades) : null;
+    const h = m ? HEALTH[m.health] : null;
+    const showStats = m && (tab === 'overview' || tab === 'analytics');
+    const cell = (label, value, cls = 'text-white') => (
+        <div className="min-w-0">
+            <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500">{label}</div>
+            <div className={`text-base font-black mt-1 truncate ${cls}`}>{value}</div>
+        </div>
+    );
+    return (
+        <div className="space-y-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                    <h2 className="text-xl font-black text-white">{title}</h2>
+                    <p className="text-xs text-slate-400 mt-1">{isLive ? sub : 'Backtest data. Not linked to a funded account.'}</p>
+                </div>
+                {hasAccounts && <AccountDropdown accounts={accounts} activeId={activeId} setActiveId={setActiveId} trades={trades} legacyCount={legacyCount} onManage={onManage} />}
+            </div>
+            {isLive && accounts.length === 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border bg-[#0E1426] border-[#232C45]">
+                    <span className="text-xs font-bold text-slate-300">No funded account yet. Create one so every trade is tracked against its own rules.</span>
+                    <button onClick={onManage} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Create account</button>
+                </div>
+            )}
+            {showStats && (
+                <div className="px-5 py-4 rounded-2xl border bg-[#0E1426] border-[#232C45] grid grid-cols-2 md:grid-cols-5 gap-x-6 gap-y-4 items-center">
+                    {cell('Balance', fm(m.bal))}
+                    {cell('Today', `${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`, m.todayPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}
+                    {cell('Daily loss left', fm(Math.max(0, m.dailyLeft)))}
+                    {cell('Drawdown room', fm(Math.max(0, m.ddLeft)))}
+                    <div><span className="inline-flex px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span></div>
+                </div>
+            )}
+            {isLive && activeId === '__legacy' && tab !== 'accounts' && (
+                <p className="text-[11px] text-slate-400">Older trades saved before accounts existed. Edit a trade to assign it to an account.</p>
+            )}
+        </div>
+    );
+}
+
+const EQ_RANGES = [['7', '7D'], ['30', '1M'], ['90', '3M'], ['all', 'All']];
+const rangeTrades = (list, rng) => {
+    if (rng === 'all') return list;
+    const d = new Date();
+    d.setDate(d.getDate() - Number(rng));
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return list.filter(t => t.date >= key);
+};
 
 export default function App() {
     const [activeDatabase, setActiveDatabase] = useState('live'); // 'live' kinva 'backtest'
@@ -631,6 +914,7 @@ export default function App() {
     const [donutLosses, setDonutLosses] = useState(0);
     const [bestMonthName, setBestMonthName] = useState("N/A");
     const [bestMonthPnL, setBestMonthPnL] = useState("$0.00");
+    const [monthMode, setMonthMode] = useState("best"); // "best" (a profitable month exists) | "worst" (every month is a loss)
 
     // Advanced Stats States
     const [statsData, setStatsData] = useState({
@@ -669,19 +953,22 @@ export default function App() {
     const [editingPageId, setEditingPageId] = useState(null);
     const [confirmDelete, setConfirmDelete] = useState({ show: false, trade: null });
     const [isDeleting, setIsDeleting] = useState(false);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    // Funded accounts + which one is selected (declared early: risk rules depend on them)
+    const [accounts, setAccounts] = useState([]);
+    const [activeAccountId, setActiveAccountId] = useState(() => { try { return localStorage.getItem('mp-active-account') || ''; } catch (e) { return ''; } });
     const [settings, setSettings] = useState(() => {
         try {
             const raw = localStorage.getItem('mintpip_settings');
             return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
         } catch (_) { return DEFAULT_SETTINGS; }
     });
-    const [settingsDraft, setSettingsDraft] = useState(DEFAULT_SETTINGS);
     const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
     const [syncFailed, setSyncFailed] = useState(false);
     const fetchTradesRef = useRef(null);
 
-    const startBal = toNum(settings.startingBalance);
+    const activeAcc = activeDatabase === 'live' ? (accounts.find(a => a.id === activeAccountId) || null) : null;
+    const risk = useMemo(() => effectiveRisk(activeAcc, settings), [activeAcc, settings]);
+    const startBal = risk.startBal;
     const analytics = useMemo(() => computeAnalytics(trades, startBal), [trades, startBal]);
     const breakdowns = useMemo(() => ({
         score: groupStats(trades, t => t.rulesCount > 0 ? `${t.rulesCount}/5 rules followed` : '').sort((a, b) => parseInt(b.label) - parseInt(a.label)),
@@ -709,14 +996,14 @@ export default function App() {
                 else if (used >= 0.8) alerts.push({ level: 'warn', text: `${label} loss is at ${(used * 100).toFixed(0)}% of your limit: ${fmtMoney(pnl)} of ${fmtMoney(-limit)}.` });
             }
         };
-        check('Daily', todayPnL, toNum(settings.dailyLossLimit), 'Stop trading for today.');
-        check('Weekly', weekPnL, toNum(settings.weeklyLossLimit), 'Stop trading for this week.');
-        const maxStreak = toNum(settings.maxLossStreak);
+        check('Daily', todayPnL, risk.dailyLimit, 'Stop trading for today.');
+        check('Weekly', weekPnL, risk.weeklyLimit, 'Stop trading for this week.');
+        const maxStreak = risk.maxStreak;
         if (maxStreak > 0 && analytics.streakType === 'Loss' && analytics.streakLen >= maxStreak) {
             alerts.push({ level: 'danger', text: `${analytics.streakLen} losses in a row (your limit is ${maxStreak}). Step away and review before the next trade.` });
         }
         return alerts;
-    }, [trades, settings, analytics, activeDatabase]);
+    }, [trades, risk, analytics, activeDatabase]);
 
     // 🗂️ Top tabs (Overview / Analytics / Calendar)
     const [activeTab, setActiveTab] = useState(() => {
@@ -937,8 +1224,6 @@ export default function App() {
     const bootDone = (dataReady && minDone) || failsafe;
     // Funded accounts (stored in MongoDB via /api/accounts)
     const ACCOUNT_COLORS = ['#6366F1', '#10B981', '#F59E0B', '#EC4899', '#06B6D4', '#8B5CF6'];
-    const [accounts, setAccounts] = useState([]);
-    const [activeAccountId, setActiveAccountId] = useState(() => { try { return localStorage.getItem('mp-active-account') || ''; } catch (e) { return ''; } });
     const [legacyCount, setLegacyCount] = useState(0);
     const rawDocsRef = useRef(null);
     const accountRef = useRef({ id: '', hasAccounts: false });
@@ -999,6 +1284,10 @@ export default function App() {
         try { localStorage.setItem('mp-ui-theme', next); } catch (e) { }
         return next;
     });
+    const [eqRange, setEqRange] = useState('all'); // equity chart range: 7 / 30 / 90 days or all
+    const eqRangeRef = useRef('all');
+    eqRangeRef.current = eqRange;
+    useEffect(() => { if (trades.length) renderCharts(trades); }, [eqRange]);
     useEffect(() => { if (trades.length) renderCharts(trades); }, [uiTheme]); // re-colour charts on style change
     // Switching Live <-> Backtest always lands on Overview, scrolled to the top
     const dbFirstRun = useRef(true);
@@ -1031,9 +1320,11 @@ export default function App() {
                     const signature = JSON.stringify(list);
                     const changed = !isSilent || signature !== lastDataSigRef.current;
                     lastDataSigRef.current = signature;
-                    if (changed) rawDocsRef.current = { list, dbType: activeDatabase };
-                    setLegacyCount(activeDatabase === 'live' ? list.filter(d => !d.accountId).length : 0);
-                    parseMongoData(scopeDocs(list, activeDatabase));
+                    if (changed) {
+                        rawDocsRef.current = { list, dbType: activeDatabase };
+                        setLegacyCount(activeDatabase === 'live' ? list.filter(d => !d.accountId).length : 0);
+                        parseMongoData(scopeDocs(list, activeDatabase));
+                    }
                     if (!isSilent) {
                         playSound('win');
                         showToast(`MongoDB Connected Successfully! (${activeDatabase.toUpperCase()} Database synced)`, 'success');
@@ -1083,8 +1374,8 @@ export default function App() {
             smtDivergence: t.smt || '',
             executionRules: t.rules || [],
             psychologicalState: t.psych || [],
-            entryPrice: t.entryPrice !== null && t.entryPrice !== undefined ? formatPrice5(t.entryPrice) : '',
-            slPrice: t.slPrice !== null && t.slPrice !== undefined ? formatPrice5(t.slPrice) : '',
+            entryPrice: t.entryPrice !== null && t.entryPrice !== undefined ? formatPrice5(t.entryPrice, t.pairTag) : '',
+            slPrice: t.slPrice !== null && t.slPrice !== undefined ? formatPrice5(t.slPrice, t.pairTag) : '',
             lotSizeRisk: t.lotSize !== null && t.lotSize !== undefined ? String(t.lotSize) : '',
             outcome: t.outcomeRaw || t.result,
             profitAmount: t.profitAmount ? String(t.profitAmount) : '',
@@ -1144,11 +1435,10 @@ export default function App() {
         URL.revokeObjectURL(url);
     };
 
-    const saveSettings = () => {
-        setSettings(settingsDraft);
-        try { localStorage.setItem('mintpip_settings', JSON.stringify(settingsDraft)); } catch (_) { }
-        setIsSettingsOpen(false);
-        showToast('⚙️ Settings saved', 'success');
+    const saveGlobalRisk = (next) => {
+        setSettings(next);
+        try { localStorage.setItem('mintpip_settings', JSON.stringify(next)); } catch (_) { }
+        showToast('Risk rules saved', 'success');
     };
 
     // 🌟 Submit new trade to the backend API (MongoDB + Cloudinary)
@@ -1187,8 +1477,8 @@ export default function App() {
                     .forEach(k => editData.append(k, newTradeForm[k] ?? ''));
                 editData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
                 editData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
-                editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
-                editData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+                editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice, newTradeForm.pairDirection));
+                editData.append('slPrice', formatPrice5(newTradeForm.slPrice, newTradeForm.pairDirection));
                 editData.append('accountId', activeDatabase === 'live' ? resolveAccountId() : '');
                 editData.append('beforeCharts', newTradeForm.beforeCharts); // optional new image URL(s)
                 editData.append('afterCharts', newTradeForm.afterCharts);
@@ -1225,8 +1515,8 @@ export default function App() {
             formData.append('session', newTradeForm.session);
             formData.append('fvgTap', newTradeForm.fvgTap);
             formData.append('smtDivergence', newTradeForm.smtDivergence);
-            formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
-            formData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+            formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice, newTradeForm.pairDirection));
+            formData.append('slPrice', formatPrice5(newTradeForm.slPrice, newTradeForm.pairDirection));
             formData.append('planeTarget', newTradeForm.planeTarget);
             formData.append('lotSizeRisk', newTradeForm.lotSizeRisk);
             formData.append('outcome', newTradeForm.outcome);
@@ -1484,19 +1774,26 @@ export default function App() {
             }
         });
 
-        let bestMonth = 'N/A';
-        let highestMonthPnL = -Infinity;
+        let bestMonth = 'N/A', highestMonthPnL = -Infinity;
+        let worstMonth = 'N/A', lowestMonthPnL = Infinity;
         for (let m in monthlyPnLMap) {
-            if (monthlyPnLMap[m] > highestMonthPnL) {
-                highestMonthPnL = monthlyPnLMap[m];
-                bestMonth = m;
-            }
+            if (monthlyPnLMap[m] > highestMonthPnL) { highestMonthPnL = monthlyPnLMap[m]; bestMonth = m; }
+            if (monthlyPnLMap[m] < lowestMonthPnL) { lowestMonthPnL = monthlyPnLMap[m]; worstMonth = m; }
         }
+        const fmtMonthPnL = (v) => `${v < 0 ? '-' : '+'}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-        if (bestMonth !== 'N/A') {
+        if (bestMonth !== 'N/A' && highestMonthPnL > 0) {
+            // at least one profitable month: show the best one
+            setMonthMode('best');
             setBestMonthName(bestMonth);
-            setBestMonthPnL(`${highestMonthPnL >= 0 ? '+' : ''}$${highestMonthPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+            setBestMonthPnL(fmtMonthPnL(highestMonthPnL));
+        } else if (worstMonth !== 'N/A') {
+            // no profitable month at all: show the month with the biggest loss instead
+            setMonthMode('worst');
+            setBestMonthName(worstMonth);
+            setBestMonthPnL(fmtMonthPnL(lowestMonthPnL));
         } else {
+            setMonthMode('best');
             setBestMonthName('N/A');
             setBestMonthPnL('$0.00');
         }
@@ -1538,7 +1835,7 @@ export default function App() {
             ? { line: '#F5A524', f0: 'rgba(245,165,36,0.30)', f1: 'rgba(245,165,36,0.07)', f2: 'rgba(245,165,36,0)', hov: '#F5A524', cross: 'rgba(245,165,36,0.5)', pie: ['#F5A524', '#7C8596'] }
             : { line: '#818CF8', f0: 'rgba(99, 102, 241, 0.34)', f1: 'rgba(99, 102, 241, 0.08)', f2: 'rgba(99, 102, 241, 0)', hov: '#6366F1', cross: 'rgba(129,140,248,0.5)', pie: ['#6366F1', '#A78BFA'] };
         if (T) k.tooltip = { ...k.tooltip, borderColor: 'rgba(245,165,36,0.4)' };
-        const sortedTrades = [...data]; // already oldest -> newest
+        const sortedTrades = rangeTrades([...data], eqRangeRef.current); // already oldest -> newest, limited to the selected range
 
         let cumulative = 0;
         const eqLabels = ['Start', ...sortedTrades.map((_, i) => `T-${i + 1}`)];
@@ -2161,7 +2458,7 @@ export default function App() {
 
         const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
         if (!apiKey) {
-            setAiAnalysisText("⚠️ OpenRouter API Key .env.local file madhye sapadli nahi. कृपया VITE_OPENROUTER_API_KEY set kara.");
+            setAiAnalysisText("⚠️ OpenRouter API key not found. Add VITE_OPENROUTER_API_KEY=your_key to client/.env.local and restart the client (npm run dev).");
             setIsAiLoading(false);
             return;
         }
@@ -2214,31 +2511,50 @@ ${languageInstruction} Structure it as follows:
 2. ⚠️ **Weaknesses & Risk Management / කළ වැරදි සහ අවදානම්**:
 3. 💡 **Trading Psychology & Execution Advice / වැඩිදියුණු කරගත යුතු උපදෙස්**:`;
 
-        try {
-            const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${apiKey.trim()}`,
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": window.location.origin,
-                    "X-Title": "MintPip Trading Journal"
-                },
-                body: JSON.stringify({
-                    model: "deepseek/deepseek-chat:free",
-                    messages: [{ role: "user", content: prompt }]
-                })
-            });
+        // Free model slugs on OpenRouter change often. We try them one by one and use the first that works.
+        // To force a model, set VITE_OPENROUTER_MODEL=... in client/.env.local (it is tried first).
+        const envModel = (import.meta.env.VITE_OPENROUTER_MODEL || '').trim();
+        const modelChain = [envModel, 'openrouter/free', 'meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free', 'deepseek/deepseek-chat']
+            .filter((m, i, arr) => m && arr.indexOf(m) === i);
+        let lastError = '';
 
-            if (response.ok) {
-                const data = await response.json();
-                const aiOutput = data.choices[0]?.message?.content || "AI analysis milali nahi.";
-                setAiAnalysisText(aiOutput);
-            } else {
-                const errorData = await response.json();
-                setAiAnalysisText(`⚠️ AI Error (${response.status}): ${errorData?.error?.message || "API request yashaswi zali nahi."}`);
+        try {
+            for (const model of modelChain) {
+                let response;
+                try {
+                    response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                        method: "POST",
+                        headers: {
+                            "Authorization": `Bearer ${apiKey.trim()}`,
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": window.location.origin,
+                            "X-Title": "MintPip Trading Journal"
+                        },
+                        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] })
+                    });
+                } catch (netErr) {
+                    lastError = 'Network error: check your internet connection.';
+                    break;
+                }
+
+                let data = null;
+                try { data = await response.json(); } catch (e) { /* non-JSON body */ }
+
+                if (response.ok) {
+                    const aiOutput = data?.choices?.[0]?.message?.content;
+                    if (aiOutput && aiOutput.trim()) { setAiAnalysisText(aiOutput); return; }
+                    lastError = `${model}: empty answer`;
+                    continue; // try the next model
+                }
+
+                const msg = data?.error?.message || 'Request failed.';
+                lastError = `${model} (${response.status}): ${msg}`;
+                if (response.status === 401) { lastError = 'Invalid OpenRouter API key (401). Check VITE_OPENROUTER_API_KEY in client/.env.local.'; break; }
+                // 402 (credits), 404 (model removed), 429 (rate limit), 5xx -> try the next model
             }
+            setAiAnalysisText(`⚠️ AI report failed.\n\n${lastError}\n\nTip: add VITE_OPENROUTER_MODEL=<model slug> to client/.env.local (pick a model from openrouter.ai/models) and restart npm run dev.`);
         } catch (error) {
-            setAiAnalysisText("⚠️ Network/CORS Error aali ahe.");
+            setAiAnalysisText(`⚠️ Unexpected error: ${error.message}`);
         } finally {
             setIsAiLoading(false);
         }
@@ -2362,7 +2678,7 @@ ${languageInstruction} Structure it as follows:
                 .mp-cmd-meta{font-size:11px;color:#94A3B8;font-weight:500}
                 .mp-cmd-empty{padding:18px;text-align:center;font-size:12px;color:#94A3B8}
                 /* ---------- Light mode repairs (dark-only classes that leaked into light theme) ---------- */
-                .mp-light [class*="bg-slate-800"]:not(.text-white),.mp-light [class*="bg-slate-900"]:not(.text-white),.mp-light [class*="bg-[#0E1426]"],.mp-light [class*="bg-[#141B30]"],.mp-light [class*="bg-[#19223A]"],.mp-light [class*="bg-[#070B16]"]{background-color:#EEF2F9!important;border-color:rgba(15,23,42,.1)!important;color:#334155}
+                .mp-light [class*="bg-slate-800"]:not(.text-white),.mp-light [class*="bg-slate-900"]:not(.text-white),.mp-light [class*="bg-[#0E1426]"],.mp-light [class*="bg-[#141B30]"],.mp-light [class*="bg-[#19223A]"],.mp-light [class*="bg-[#070B16]"],.mp-light [class*="bg-[#0B1020]"]{background-color:#EEF2F9!important;border-color:rgba(15,23,42,.1)!important;color:#334155}
                 .mp-light [class~="bg-white/5"],.mp-light [class~="bg-white/10"],.mp-light [class~="hover:bg-white/5"]:hover,.mp-light [class~="hover:bg-white/10"]:hover{background-color:rgba(15,23,42,.05)!important}
                 .mp-light [class*="border-white/"],.mp-light [class*="border-[#232C45]"]{border-color:rgba(15,23,42,.1)!important}
                 .mp-light [class*="divide-white"]>*{border-color:rgba(15,23,42,.08)!important}
@@ -2449,10 +2765,6 @@ ${languageInstruction} Structure it as follows:
 
 
             <Splash done={bootDone} />
-
-            <button onClick={toggleUiTheme} className="mp-theme-fab" title="Switch interface style">
-                <Ico n="edit" className="w-3.5 h-3.5" />{uiTheme === 'aurora' ? 'Terminal Pro view' : 'Aurora view'}
-            </button>
 
             {cmdOpen && (() => {
                 const q = cmdQ.trim().toLowerCase();
@@ -2631,6 +2943,17 @@ ${languageInstruction} Structure it as follows:
                         </button>
 
                         <button
+                            onClick={toggleUiTheme}
+                            className={`h-9 px-3 rounded-xl border transition-all duration-200 flex items-center justify-center gap-2 text-xs font-bold shadow-sm ${uiTheme === 'terminal'
+                                ? 'bg-amber-500/15 border-amber-500/50 text-amber-400'
+                                : isDark ? 'bg-[#0E1426] hover:bg-[#19223A] border-white/10 text-slate-300' : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700'}`}
+                            title={uiTheme === 'terminal' ? 'Interface style: Terminal Pro (click for Aurora)' : 'Interface style: Aurora (click for Terminal Pro)'}
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8" /></svg>
+                            <span className="hidden md:inline">{uiTheme === 'terminal' ? 'Terminal' : 'Aurora'}</span>
+                        </button>
+
+                        <button
                             onClick={toggleTheme}
                             className={`w-9 h-9 rounded-xl border transition-all duration-200 flex items-center justify-center text-sm shadow-sm ${isDark
                                 ? 'bg-[#0E1426] hover:bg-[#19223A] border-white/10 text-amber-400'
@@ -2704,12 +3027,12 @@ ${languageInstruction} Structure it as follows:
                     </div>
                 ))}
 
-                {activeDatabase === 'live' && <AccountStrip accounts={accounts} activeId={activeAccountId} setActiveId={setActiveAccountId} trades={trades} legacyCount={legacyCount} onManage={() => setActiveTab('accounts')} />}
+                <PageToolbar tab={activeTab} isLive={activeDatabase === 'live'} accounts={accounts} activeId={activeAccountId} setActiveId={setActiveAccountId} trades={trades} legacyCount={legacyCount} onManage={() => setActiveTab('accounts')} />
 
                 {activeTab === 'overview' && activeDatabase === 'live' && <AccountGuard account={accounts.find(a => a.id === activeAccountId) || accounts[0]} trades={trades} />}
 
                 {activeTab === 'accounts' && (
-                    <AccountsPanel accounts={accounts} onSave={saveAccount} onDelete={deleteAccount} activeId={activeAccountId} trades={trades} isLive={activeDatabase === 'live'} />
+                    <AccountsPanel accounts={accounts} onSave={saveAccount} onDelete={deleteAccount} onSelect={setActiveAccountId} activeId={activeAccountId} trades={trades} isLive={activeDatabase === 'live'} />
                 )}
 
                 {activeTab === 'overview' && (<>
@@ -2772,17 +3095,17 @@ ${languageInstruction} Structure it as follows:
                     <div className={`relative p-6 rounded-2xl border shadow-[0_1px_2px_rgba(0,0,0,0.3)] group transition-all duration-300 overflow-hidden ${isDark ? 'bg-[#0E1426] border-white/10' : 'bg-white border-slate-200'}`}>
                         <span className="absolute inset-x-0 top-0 h-0.5 bg-[#8B5CF6]/60"></span>
                         <div className="flex items-center justify-between mb-3 relative z-10">
-                            <span className="text-xs uppercase tracking-wider font-bold text-slate-400">Best Performance Month</span>
-                            <div className="p-2.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 shadow-inner">
+                            <span className="text-xs uppercase tracking-wider font-bold text-slate-400">{monthMode === 'worst' ? 'Worst Performance Month' : 'Best Performance Month'}</span>
+                            <div className={`p-2.5 rounded-2xl border shadow-inner ${monthMode === 'worst' ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' : 'bg-amber-500/10 border-amber-500/20 text-amber-400'}`}>
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={monthMode === 'worst' ? "M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" : "M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"} />
                                 </svg>
                             </div>
                         </div>
                         <div className="flex items-baseline justify-between mt-1 relative z-10">
                             <div>
-                                <span className={`text-xl lg:text-2xl font-black tracking-tight  ${isDark ? 'text-white' : 'text-slate-900'}`}>{bestMonthName}</span>
-                                <p className="text-xs text-emerald-400 font-extrabold mt-0.5 bg-emerald-500/10 px-2 py-0.5 rounded-lg border border-emerald-500/20 inline-block">{bestMonthPnL}</p>
+                                <span className={`text-xl lg:text-2xl font-black tracking-tight  ${isDark ? 'text-white' : 'text-slate-900'}`}>{bestMonthName === 'N/A' ? <span className="text-slate-500">No data yet</span> : bestMonthName}</span>
+                                {bestMonthName !== 'N/A' && <p className={`text-xs font-extrabold mt-0.5 px-2 py-0.5 rounded-lg border inline-block ${monthMode === 'worst' ? 'text-rose-400 bg-rose-500/10 border-rose-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'}`}>{bestMonthPnL}</p>}
                             </div>
                         </div>
                     </div>
@@ -2801,6 +3124,22 @@ ${languageInstruction} Structure it as follows:
                                 </h2>
                                 <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Account balance progression over executions</p>
                             </div>
+                            {(() => {
+                                const rt = rangeTrades(trades, eqRange);
+                                const net = rt.reduce((a, t) => a + t.pnl, 0);
+                                let c = 0, pk = 0, dd = 0;
+                                rt.forEach(t => { c += t.pnl; pk = Math.max(pk, c); dd = Math.max(dd, pk - c); });
+                                return (
+                                    <div className="flex flex-col items-end gap-2">
+                                        <div className="inline-flex p-1 rounded-xl border bg-[#141B30] border-[#232C45]">
+                                            {EQ_RANGES.map(([k, label]) => (
+                                                <button key={k} onClick={() => setEqRange(k)} className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-colors ${eqRange === k ? 'bg-indigo-500/20 text-indigo-300' : 'text-slate-400 hover:text-slate-200'}`}>{label}</button>
+                                            ))}
+                                        </div>
+                                        <div className="text-[11px] text-slate-400">{rt.length} trades · net <b className={net >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{net >= 0 ? '+' : '-'}${Math.abs(net).toFixed(2)}</b> · max drawdown <b className="text-slate-200">${dd.toFixed(2)}</b></div>
+                                    </div>
+                                );
+                            })()}
                         </div>
                         <div className="relative h-72 w-full">
                             <canvas ref={equityChartRef}></canvas>
@@ -2954,12 +3293,6 @@ ${languageInstruction} Structure it as follows:
                             <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Risk, drawdown and where your edge really comes from ({activeDatabase === 'live' ? 'Forward Test' : 'Backtest'})</p>
                         </div>
                         <button
-                            onClick={() => { setSettingsDraft(settings); setIsSettingsOpen(true); }}
-                            className={`px-4 py-2 rounded-xl border text-xs font-bold transition ${isDark ? 'bg-[#141B30] border-[#232C45] text-slate-200 hover:bg-[#19223A]' : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'}`}
-                        >
-                            ⚙️ Account & Risk Settings
-                        </button>
-                        <button
                             onClick={() => exportTradesCSV(trades)}
                             disabled={trades.length === 0}
                             className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-bold transition"
@@ -2967,6 +3300,11 @@ ${languageInstruction} Structure it as follows:
                             ⬇ Export CSV
                         </button>
                     </div>
+
+                    <RiskRulesPanel
+                        acc={activeAcc} global={settings} risk={risk} trades={trades} analytics={analytics} isLive={activeDatabase === 'live'}
+                        onSaveAccount={saveAccount} onSaveGlobal={saveGlobalRisk}
+                    />
 
                     {trades.length === 0 ? (
                         <p className="text-xs text-slate-500">No trades loaded yet.</p>
@@ -2976,7 +3314,7 @@ ${languageInstruction} Structure it as follows:
                                 <StatTile isDark={isDark}
                                     label={startBal > 0 ? 'Account Balance' : 'Net PnL'}
                                     value={startBal > 0 ? fmtMoney(analytics.equity) : fmtSigned(analytics.net)}
-                                    sub={startBal > 0 ? `Start ${fmtMoney(startBal)} · ${(analytics.net / startBal * 100).toFixed(1)}% return` : 'Set a starting balance in Settings'}
+                                    sub={startBal > 0 ? `Start ${fmtMoney(startBal)} · ${(analytics.net / startBal * 100).toFixed(1)}% return` : 'Set a starting balance in Risk rules'}
                                     tone={analytics.net >= 0 ? 'good' : 'bad'} />
                                 <StatTile isDark={isDark}
                                     label="Max Drawdown"
@@ -3011,8 +3349,8 @@ ${languageInstruction} Structure it as follows:
                                 <StatTile isDark={isDark}
                                     label="Avg Loss vs Risk Target"
                                     value={startBal > 0 ? `${(analytics.avgLoss / startBal * 100).toFixed(2)}%` : '-'}
-                                    sub={startBal > 0 ? (toNum(settings.riskTargetPct) > 0 ? `Target ${toNum(settings.riskTargetPct)}% of starting balance` : 'Set your risk % target in Settings') : 'Set starting balance & risk % in Settings'}
-                                    tone={startBal > 0 && toNum(settings.riskTargetPct) > 0 ? ((analytics.avgLoss / startBal * 100) > toNum(settings.riskTargetPct) ? 'bad' : 'good') : 'neutral'} />
+                                    sub={startBal > 0 ? (risk.riskPct > 0 ? `Target ${risk.riskPct}% of starting balance` : 'Set your risk % target in Risk rules') : 'Set starting balance & risk % in Risk rules'}
+                                    tone={startBal > 0 && risk.riskPct > 0 ? ((analytics.avgLoss / startBal * 100) > risk.riskPct ? 'bad' : 'good') : 'neutral'} />
                             </div>
 
                             <div className={`p-5 rounded-2xl border ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
@@ -3249,6 +3587,8 @@ ${languageInstruction} Structure it as follows:
                                         <option value="GBP/USD - BUY">GBP/USD - BUY</option>
                                         <option value="EUR/USD - SELL">EUR/USD - SELL</option>
                                         <option value="EUR/USD - BUY">EUR/USD - BUY</option>
+                                        <option value="XAU/USD - SELL">XAU/USD (Gold) - SELL</option>
+                                        <option value="XAU/USD - BUY">XAU/USD (Gold) - BUY</option>
                                     </select>
                                 </div>
                             </div>
@@ -3343,10 +3683,10 @@ ${languageInstruction} Structure it as follows:
                                     <input 
                                         type="number" 
                                         step="0.00001"
-                                        placeholder="1.27450"
+                                        placeholder={isGoldPair(newTradeForm.pairDirection) ? "4155.40" : "1.27450"}
                                         value={newTradeForm.entryPrice} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, entryPrice: e.target.value})}
-                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, entryPrice: formatPrice5(prev.entryPrice) }))}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, entryPrice: formatPrice5(prev.entryPrice, prev.pairDirection) }))}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
@@ -3355,10 +3695,10 @@ ${languageInstruction} Structure it as follows:
                                     <input 
                                         type="number" 
                                         step="0.00001"
-                                        placeholder="1.27600"
+                                        placeholder={isGoldPair(newTradeForm.pairDirection) ? "4149.80" : "1.27600"}
                                         value={newTradeForm.slPrice} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, slPrice: e.target.value})}
-                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, slPrice: formatPrice5(prev.slPrice) }))}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, slPrice: formatPrice5(prev.slPrice, prev.pairDirection) }))}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
@@ -3557,40 +3897,6 @@ ${languageInstruction} Structure it as follows:
                             <button disabled={isDeleting} onClick={handleDeleteTrade} className="flex-1 px-4 py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold transition shadow-md shadow-rose-500/20">
                                 {isDeleting ? 'Deleting...' : 'Yes, delete'}
                             </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* ⚙️ Account & Risk Settings */}
-            {isSettingsOpen && (
-                <div onClick={() => setIsSettingsOpen(false)} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
-                    <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-2xl border max-w-lg w-full shadow-2xl space-y-5 ${isDark ? 'bg-[#0E1426] border-white/15 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}>
-                        <div className="flex items-center justify-between border-b pb-4 border-slate-700/40">
-                            <h3 className="text-lg font-black">⚙️ Account & Risk Settings</h3>
-                            <button onClick={() => setIsSettingsOpen(false)} className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 transition font-bold text-sm">✕</button>
-                        </div>
-                        <p className="text-xs text-slate-500">Used for drawdown %, balance, risk checks and the stop-trading warnings. Saved in this browser only. Leave a field empty to turn it off.</p>
-                        {[
-                            { key: 'startingBalance', label: 'STARTING BALANCE ($)', ph: 'e.g. 10000' },
-                            { key: 'riskTargetPct', label: 'RISK PER TRADE TARGET (% of starting balance)', ph: 'e.g. 1' },
-                            { key: 'dailyLossLimit', label: 'DAILY LOSS LIMIT ($)', ph: 'e.g. 300' },
-                            { key: 'weeklyLossLimit', label: 'WEEKLY LOSS LIMIT ($)', ph: 'e.g. 600' },
-                            { key: 'maxLossStreak', label: 'WARN AFTER THIS MANY LOSSES IN A ROW', ph: 'e.g. 3' }
-                        ].map(f => (
-                            <div key={f.key}>
-                                <label className="block text-xs font-bold mb-1 text-slate-400">{f.label}</label>
-                                <input
-                                    type="number" min="0" step="any" placeholder={f.ph}
-                                    value={settingsDraft[f.key]}
-                                    onChange={(e) => setSettingsDraft(prev => ({ ...prev, [f.key]: e.target.value }))}
-                                    className={`w-full p-2.5 rounded-xl border text-sm font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
-                                />
-                            </div>
-                        ))}
-                        <div className="flex justify-end gap-3 pt-2">
-                            <button onClick={() => setIsSettingsOpen(false)} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700 transition">Cancel</button>
-                            <button onClick={saveSettings} className="px-6 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow-sm">Save settings</button>
                         </div>
                     </div>
                 </div>
@@ -3885,8 +4191,8 @@ ${languageInstruction} Structure it as follows:
                             <div className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
                                 <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-400">Execution Details</h4>
                                 <div className="grid grid-cols-3 gap-3 text-xs">
-                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Entry</span><b>{selectedTrade.entryPrice !== null ? formatPrice5(selectedTrade.entryPrice) : '-'}</b></div>
-                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">SL</span><b>{selectedTrade.slPrice !== null ? formatPrice5(selectedTrade.slPrice) : '-'}</b></div>
+                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Entry</span><b>{selectedTrade.entryPrice !== null ? formatPrice5(selectedTrade.entryPrice, selectedTrade.pairTag) : '-'}</b></div>
+                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">SL</span><b>{selectedTrade.slPrice !== null ? formatPrice5(selectedTrade.slPrice, selectedTrade.pairTag) : '-'}</b></div>
                                     <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Lot size & risk</span><b>{selectedTrade.lotSize !== null ? selectedTrade.lotSize : '-'}</b></div>
                                 </div>
                                 {(selectedTrade.fvgTap || selectedTrade.smt) && (

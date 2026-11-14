@@ -116,6 +116,9 @@ const accountSchema = new mongoose.Schema(
     startDate: { type: String, default: '' },
     endDate: { type: String, default: '' },
     dailyLossPct: { type: Number, default: 5 },
+    weeklyLossPct: { type: Number, default: 0 }, // 0 = off
+    riskTargetPct: { type: Number, default: 0 }, // risk per trade, % of start balance (0 = off)
+    maxLossStreak: { type: Number, default: 0 }, // warn after N losses in a row (0 = off)
     maxDDPct: { type: Number, default: 10 },
     ddType: { type: String, default: 'static' }, // static | trailing | locked
     targetPct: { type: Number, default: 0 },
@@ -131,7 +134,7 @@ const accountSchema = new mongoose.Schema(
 );
 const Account = mongoose.models.Account || mongoose.model('Account', accountSchema, ACCOUNTS_COLLECTION);
 
-const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color'];
+const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'weeklyLossPct', 'riskTargetPct', 'maxLossStreak', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color'];
 const pickAccount = (b = {}) => {
   const out = {};
   ACCOUNT_KEYS.forEach((k) => { if (b[k] !== undefined) out[k] = b[k]; });

@@ -25,11 +25,10 @@ const getDefaultTradeForm = () => ({
     note: ''
 });
 
-// Prices are shown with 5 decimals (1.3 -> 1.30000); gold (XAU) uses 2 decimals (4155.4 -> 4155.40). Returns '' for empty / invalid input
-const isGoldPair = (pairDirection) => String(pairDirection || '').toUpperCase().includes('XAU');
-const formatPrice5 = (value, pairDirection) => {
+// Always show prices with 5 decimals (1.3 -> 1.30000). Returns '' for empty / invalid input
+const formatPrice5 = (value) => {
     const num = parseFloat(value);
-    return Number.isFinite(num) ? num.toFixed(isGoldPair(pairDirection) ? 2 : 5) : '';
+    return Number.isFinite(num) ? num.toFixed(5) : '';
 };
 
 // Counts image links typed in the URL box (separated by comma or new line)
@@ -269,6 +268,428 @@ function DrawdownChart({ series, isDark }) {
 // ---------------------------------------------------------------------------
 // Backend base URL: leave empty to use the Vite proxy, or set VITE_API_URL for a deployed API
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
+
+// ---------------------------------------------------------------------------
+// AI performance report modal (self-contained; wrapped so its helper names cannot clash with this file)
+// ---------------------------------------------------------------------------
+const AiReportModal = (() => {
+
+// ---------------------------------------------------------------------------
+// Period helpers (local dates, weeks start on Monday)
+// ---------------------------------------------------------------------------
+const PERIODS = [
+    { key: 'week', label: 'This week' },
+    { key: 'last_week', label: 'Last week' },
+    { key: 'month', label: 'This month' },
+    { key: 'last_month', label: 'Last month' },
+    { key: 'last_30', label: 'Last 30 days' },
+    { key: 'all', label: 'All time' }
+];
+const pad = (n) => String(n).padStart(2, '0');
+const dkey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const FAR = '9999-12-31';
+
+// Returns the date range of a period plus the range of the period before it (only for complete periods,
+// so "this week so far" is never compared with a full week).
+function periodRange(key, now = new Date()) {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const monday = addDays(today, -((today.getDay() + 6) % 7));
+    const range = (from, to) => ({ from: dkey(from), to: dkey(to) });
+    if (key === 'week') return { cur: { from: dkey(monday), to: FAR }, prev: null };
+    if (key === 'last_week') return { cur: range(addDays(monday, -7), addDays(monday, -1)), prev: range(addDays(monday, -14), addDays(monday, -8)) };
+    if (key === 'month') return { cur: { from: dkey(new Date(today.getFullYear(), today.getMonth(), 1)), to: FAR }, prev: null };
+    if (key === 'last_month') {
+        const first = new Date(today.getFullYear(), today.getMonth() - 1, 1), last = new Date(today.getFullYear(), today.getMonth(), 0);
+        return { cur: range(first, last), prev: range(new Date(today.getFullYear(), today.getMonth() - 2, 1), new Date(today.getFullYear(), today.getMonth() - 1, 0)) };
+    }
+    if (key === 'last_30') return { cur: range(addDays(today, -29), today), prev: range(addDays(today, -59), addDays(today, -30)) };
+    return { cur: { from: '0000-01-01', to: FAR }, prev: null };
+}
+const inRange = (t, r) => !!r && t.date && t.date !== 'N/A' && t.date >= r.from && t.date <= r.to;
+
+const toPayload = (t) => ({ date: t.date, pair: t.pair, direction: t.direction, session: t.session, rules: t.rules || [], psych: t.psych || [], pnl: t.pnl, result: t.result, lot: t.lotSize, note: (t.rawNote || '').trim() });
+
+// ---------------------------------------------------------------------------
+// Formatting
+// ---------------------------------------------------------------------------
+const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+const moneySigned = (v) => `${v < 0 ? '-' : '+'}$${Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+const compact = (v) => { const a = Math.abs(v); const s = a >= 1000 ? `${(a / 1000).toFixed(a >= 10000 ? 0 : 1)}k` : String(Math.round(a)); return `${v < 0 ? '-' : ''}$${s}`; };
+const SOURCE_LABEL = {
+    ai: (m) => `Written by AI from verified metrics${m ? ` (${m})` : ''}`,
+    'ai+rules': (m) => `AI commentary plus rule-based analysis${m ? ` (${m})` : ''}`,
+    rules: () => 'Rule-based analysis (AI was not used)'
+};
+
+// ---------------------------------------------------------------------------
+// Charts (plain SVG, no dependencies)
+// ---------------------------------------------------------------------------
+function SeriesChart({ series, isDark, kind, label }) {
+    const w = 600, h = 170, padL = 46, padR = 8, padT = 10, padB = 10;
+    const n = series.length;
+    if (n < 2) return <p className="text-xs text-slate-500 py-8 text-center">Not enough trades to draw a curve yet.</p>;
+    const min = Math.min(0, ...series), max = Math.max(0, ...series), span = max - min || 1;
+    const x = (i) => padL + (i / (n - 1)) * (w - padL - padR);
+    const y = (v) => padT + (1 - (v - min) / span) * (h - padT - padB);
+    const pts = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+    const area = `M${x(0).toFixed(1)},${y(0).toFixed(1)} L${pts.join(' L')} L${x(n - 1).toFixed(1)},${y(0).toFixed(1)} Z`;
+    const up = series[n - 1] >= 0;
+    const color = kind === 'dd' ? '#F43F5E' : up ? '#10B981' : '#F43F5E';
+    const grid = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(15,23,42,0.2)';
+    const txt = isDark ? '#94A3B8' : '#64748B';
+    return (
+        <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto" role="img" aria-label={label}>
+            <line x1={padL} x2={w - padR} y1={y(0)} y2={y(0)} stroke={grid} strokeDasharray="4 4" />
+            <path d={area} fill={color} opacity="0.14" />
+            <polyline points={pts.join(' ')} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+            <text x={padL - 6} y={y(max) + 4} textAnchor="end" fontSize="11" fill={txt}>{compact(max)}</text>
+            <text x={padL - 6} y={y(0) + 4} textAnchor="end" fontSize="11" fill={txt}>$0</text>
+            {min < 0 && <text x={padL - 6} y={y(min) + 4} textAnchor="end" fontSize="11" fill={txt}>{compact(min)}</text>}
+        </svg>
+    );
+}
+
+function DailyBars({ days, isDark }) {
+    if (!days || days.length < 2) return <p className="text-xs text-slate-500 py-6 text-center">Not enough trading days yet.</p>;
+    const w = 600, h = 120, pad = 8;
+    const maxAbs = Math.max(...days.map((d) => Math.abs(d.pnl)), 1);
+    const bw = (w - 2 * pad) / days.length, mid = h / 2;
+    return (
+        <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto" role="img" aria-label="Daily profit and loss">
+            <line x1={pad} x2={w - pad} y1={mid} y2={mid} stroke={isDark ? 'rgba(255,255,255,0.18)' : 'rgba(15,23,42,0.2)'} />
+            {days.map((d, i) => {
+                const bh = Math.max(1.5, (Math.abs(d.pnl) / maxAbs) * (mid - 6));
+                return <rect key={d.date} x={pad + i * bw + 1} y={d.pnl >= 0 ? mid - bh : mid} width={Math.max(1, bw - 2)} height={bh} rx="1.5" fill={d.pnl >= 0 ? '#10B981' : '#F43F5E'}><title>{`${d.date}: ${moneySigned(d.pnl)} (${d.n} trade${d.n === 1 ? '' : 's'})`}</title></rect>;
+            })}
+        </svg>
+    );
+}
+
+function NetBars({ rows, isDark }) {
+    if (!rows.length) return <p className="text-xs text-slate-500">Not enough data yet.</p>;
+    const maxAbs = Math.max(...rows.map((r) => Math.abs(r.net)), 1);
+    return (
+        <div className="space-y-2.5">
+            {rows.map((r) => (
+                <div key={r.label} className="space-y-1">
+                    <div className="flex items-baseline justify-between gap-2 text-xs">
+                        <span className={`font-semibold truncate ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{r.label}</span>
+                        <span className="text-slate-400 whitespace-nowrap">{r.n} trade{r.n === 1 ? '' : 's'}, {r.winRate.toFixed(0)}% wins, <b className={r.net >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{moneySigned(r.net)}</b></span>
+                    </div>
+                    <div className={`h-1.5 rounded-full ${isDark ? 'bg-white/10' : 'bg-slate-200'}`}>
+                        <div className={`h-full rounded-full ${r.net >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ width: `${Math.max(3, (Math.abs(r.net) / maxAbs) * 100)}%` }} />
+                    </div>
+                    {r.lowSample && <span className="text-[11px] italic text-slate-500">Low sample (under 5 trades)</span>}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function RuleEdgeBars({ rows, isDark }) {
+    const usable = rows.filter((r) => r.withN && r.withoutN);
+    if (!usable.length) return <p className="text-xs text-slate-500">Log execution rules on more trades to see which ones carry your edge.</p>;
+    return (
+        <div className="space-y-3">
+            {usable.map((r) => (
+                <div key={r.label} className="space-y-1">
+                    <div className="flex items-baseline justify-between gap-2 text-xs">
+                        <span className={`font-semibold truncate ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{r.label}</span>
+                        <b className={r.edge >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{r.edge >= 0 ? '+' : ''}{r.edge.toFixed(0)} pts</b>
+                    </div>
+                    {[['With rule', r.withWR, r.withN, 'bg-violet-500'], ['Without', r.withoutWR, r.withoutN, 'bg-slate-500']].map(([name, wr, n, cls]) => (
+                        <div key={name} className="flex items-center gap-2 text-[11px] text-slate-400">
+                            <span className="w-16 shrink-0">{name}</span>
+                            <div className={`flex-1 h-1.5 rounded-full ${isDark ? 'bg-white/10' : 'bg-slate-200'}`}><div className={`h-full rounded-full ${cls}`} style={{ width: `${Math.max(2, wr)}%` }} /></div>
+                            <span className="w-20 text-right">{wr.toFixed(0)}% ({n})</span>
+                        </div>
+                    ))}
+                    {(r.withN < 5 || r.withoutN < 5) && <span className="text-[11px] italic text-slate-500">Low sample</span>}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Report view
+// ---------------------------------------------------------------------------
+function Card({ title, sub, isDark, children, className = '' }) {
+    return (
+        <section className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-slate-50 border-slate-200'} ${className}`}>
+            {title && <div><h4 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{title}</h4>{sub && <p className="text-[11px] text-slate-500 mt-0.5">{sub}</p>}</div>}
+            {children}
+        </section>
+    );
+}
+
+function Kpi({ label, value, sub, tone, isDark }) {
+    const cls = { good: 'text-emerald-400', bad: 'text-rose-400', neutral: isDark ? 'text-white' : 'text-slate-900' }[tone || 'neutral'];
+    return (
+        <div className={`p-4 rounded-2xl border ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+            <span className="text-slate-400 text-[11px] block font-semibold">{label}</span>
+            <span className={`text-xl font-black mt-1 block ${cls}`}>{value}</span>
+            {sub && <span className="text-[11px] text-slate-500 block mt-0.5">{sub}</span>}
+        </div>
+    );
+}
+
+function InsightList({ items, kind, factMap, isDark }) {
+    const accent = kind === 'good' ? 'border-l-emerald-500' : 'border-l-rose-500';
+    const sevCls = { high: 'bg-rose-500/15 text-rose-400', medium: 'bg-amber-500/15 text-amber-400', low: 'bg-slate-500/15 text-slate-400' };
+    if (!items.length) return <p className="text-xs text-slate-500">Nothing stands out yet. More logged trades will sharpen this.</p>;
+    return (
+        <ul className="space-y-3">
+            {items.map((it, i) => (
+                <li key={i} className={`pl-3 border-l-2 ${accent} space-y-1`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{it.title}</span>
+                        {it.severity && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded ${sevCls[it.severity]}`}>{it.severity} priority</span>}
+                    </div>
+                    <p className={`text-[13px] leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{it.insight}</p>
+                    <details className="text-[11px] text-slate-500">
+                        <summary className="cursor-pointer select-none hover:text-violet-400">Evidence</summary>
+                        <ul className="mt-1 space-y-0.5 list-disc pl-4">{it.evidence.map((id) => <li key={id}>{factMap[id] || id}</li>)}</ul>
+                    </details>
+                </li>
+            ))}
+        </ul>
+    );
+}
+
+function ReportView({ report, isDark }) {
+    const { metrics: m, insights: ins, facts, warnings } = report;
+    const o = m.overview, r = m.risk;
+    const factMap = useMemo(() => Object.fromEntries(facts.map((f) => [f.id, f.text])), [facts]);
+    const checks = facts.filter((f) => /^(risk|behavior|quality)\./.test(f.id));
+    const dot = { good: 'bg-emerald-500', bad: 'bg-rose-500', neutral: 'bg-slate-500' };
+    const strong = isDark ? 'text-white' : 'text-slate-900';
+    return (
+        <div className="space-y-5">
+            <Card isDark={isDark}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold text-violet-400">{(SOURCE_LABEL[report.source] || SOURCE_LABEL.rules)(report.model)}{report.cached ? ', saved result' : ''}</span>
+                    <span className="text-[11px] text-slate-500">{report.meta.n} trades, {report.meta.from} to {report.meta.to}</span>
+                </div>
+                <p className={`text-base font-semibold leading-snug ${strong}`}>{ins.verdict}</p>
+            </Card>
+
+            {warnings.length > 0 && (
+                <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300 space-y-1">
+                    {warnings.map((w, i) => <p key={i}>{w}</p>)}
+                </div>
+            )}
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <Kpi isDark={isDark} label="Net P&L" value={moneySigned(o.net)} tone={o.net > 0 ? 'good' : o.net < 0 ? 'bad' : 'neutral'} sub={`${o.wins} wins, ${o.losses} losses`} />
+                <Kpi isDark={isDark} label="Win rate" value={`${o.winRate.toFixed(1)}%`} tone={o.breakEvenWR !== null ? (o.winRate > o.breakEvenWR ? 'good' : 'bad') : 'neutral'} sub={o.ci ? `95% range ${o.ci[0].toFixed(0)}% to ${o.ci[1].toFixed(0)}%` : null} />
+                <Kpi isDark={isDark} label="Profit factor" value={o.profitFactor !== null ? o.profitFactor.toFixed(2) : 'n/a'} tone={o.profitFactor === null ? 'neutral' : o.profitFactor >= 1.3 ? 'good' : o.profitFactor < 1 ? 'bad' : 'neutral'} sub="Gross profit / gross loss" />
+                <Kpi isDark={isDark} label="Expectancy" value={o.expectancyR !== null ? `${o.expectancyR >= 0 ? '+' : ''}${o.expectancyR.toFixed(2)}R` : moneySigned(o.expectancy)} tone={o.expectancy > 0 ? 'good' : o.expectancy < 0 ? 'bad' : 'neutral'} sub={`${moneySigned(o.expectancy)} per trade`} />
+                <Kpi isDark={isDark} label="Max drawdown" value={money(r.maxDD)} tone={r.maxDDPct !== null && r.maxDDPct >= 8 ? 'bad' : 'neutral'} sub={r.maxDDPct !== null ? `${r.maxDDPct.toFixed(1)}% of balance` : `${money(r.currentDD)} below peak now`} />
+                <Kpi isDark={isDark} label="Payoff ratio" value={o.payoff !== null ? o.payoff.toFixed(2) : 'n/a'} tone="neutral" sub={o.breakEvenWR !== null ? `Break-even win rate ${o.breakEvenWR.toFixed(0)}%` : null} />
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4">
+                <Card isDark={isDark} title="Equity curve" sub="Cumulative P&L after each trade"><SeriesChart series={m.series.equity} isDark={isDark} kind="equity" label="Equity curve" /></Card>
+                <Card isDark={isDark} title="Drawdown" sub="Distance below the equity peak"><SeriesChart series={m.series.drawdown} isDark={isDark} kind="dd" label="Drawdown curve" /></Card>
+            </div>
+            <Card isDark={isDark} title="Daily P&L" sub="Last 60 trading days in the period"><DailyBars days={m.series.daily} isDark={isDark} /></Card>
+
+            <div className="grid md:grid-cols-2 gap-4">
+                <Card isDark={isDark} title="What is working"><InsightList items={ins.strengths} kind="good" factMap={factMap} isDark={isDark} /></Card>
+                <Card isDark={isDark} title="What is costing you"><InsightList items={ins.weaknesses} kind="bad" factMap={factMap} isDark={isDark} /></Card>
+            </div>
+
+            <Card isDark={isDark} title="Action plan" sub="Most important first">
+                <ol className="space-y-3 list-decimal pl-5">
+                    {ins.actionPlan.map((a, i) => (
+                        <li key={i} className="space-y-0.5">
+                            <p className={`text-sm font-semibold ${strong}`}>{a.action}</p>
+                            {a.why && <p className="text-[13px] text-slate-400">{a.why}</p>}
+                            <details className="text-[11px] text-slate-500">
+                                <summary className="cursor-pointer select-none hover:text-violet-400">Evidence</summary>
+                                <ul className="mt-1 space-y-0.5 list-disc pl-4">{a.evidence.map((id) => <li key={id}>{factMap[id] || id}</li>)}</ul>
+                            </details>
+                        </li>
+                    ))}
+                </ol>
+            </Card>
+
+            <div className="grid md:grid-cols-2 gap-4">
+                <Card isDark={isDark} title="Edge per execution rule" sub="Win rate when the rule was followed vs not"><RuleEdgeBars rows={m.ruleEdge} isDark={isDark} /></Card>
+                <Card isDark={isDark} title="By session" sub="Net P&L"><NetBars rows={m.groups.session} isDark={isDark} /></Card>
+                <Card isDark={isDark} title="By weekday" sub="Net P&L"><NetBars rows={m.groups.weekday} isDark={isDark} /></Card>
+                <Card isDark={isDark} title="By pair" sub="Net P&L"><NetBars rows={m.groups.pair} isDark={isDark} /></Card>
+                {m.groups.psych.length > 0 && <Card isDark={isDark} title="By psychological state" sub="Net P&L"><NetBars rows={m.groups.psych} isDark={isDark} /></Card>}
+                <Card isDark={isDark} title="Risk and behaviour checks" sub="Computed from your trade sequence">
+                    <ul className="space-y-2">
+                        {checks.map((f) => (
+                            <li key={f.id} className="flex gap-2 text-[13px]">
+                                <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${dot[f.tone]}`} aria-hidden="true" />
+                                <span className={isDark ? 'text-slate-300' : 'text-slate-700'}>{f.text}</span>
+                            </li>
+                        ))}
+                    </ul>
+                </Card>
+            </div>
+
+            {ins.confidenceNotes.length > 0 && (
+                <Card isDark={isDark} title="How far to trust this">
+                    <ul className="space-y-1 list-disc pl-5 text-[13px] text-slate-400">{ins.confidenceNotes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+                </Card>
+            )}
+            <p className="text-[11px] text-slate-500">All numbers are calculated from your journal by code. The AI only explains them. This is feedback on process and risk, not financial advice.</p>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Modal
+// ---------------------------------------------------------------------------
+function AiReportModal({ open, onClose, isDark, trades, activeDatabase, activeAcc, risk, apiBase = '' }) {
+    const [period, setPeriod] = useState('month');
+    const [loading, setLoading] = useState(false);
+    const [report, setReport] = useState(null);
+    const [error, setError] = useState('');
+    const abortRef = useRef(null);
+    const printRef = useRef(null); // hidden light-theme copy of the report, used for the PDF
+
+    const scopeKey = `${activeDatabase}|${activeAcc ? activeAcc.id : ''}`;
+    useEffect(() => { setReport(null); setError(''); }, [scopeKey]);
+    useEffect(() => () => { if (abortRef.current) abortRef.current.abort(); }, []);
+
+    const slices = useMemo(() => {
+        const { cur, prev } = periodRange(period);
+        return { current: trades.filter((t) => inRange(t, cur)), previous: prev ? trades.filter((t) => inRange(t, prev)) : [] };
+    }, [trades, period]);
+
+    if (!open) return null;
+
+    const accountName = activeDatabase === 'live' ? (activeAcc ? activeAcc.name : 'Live account') : 'Backtest';
+    const periodLabel = PERIODS.find((p) => p.key === period).label;
+
+    const generate = async (refresh = false) => {
+        if (loading) return;
+        if (!slices.current.length) { setError(`There are no trades in "${periodLabel}". Pick a longer period.`); return; }
+        if (abortRef.current) abortRef.current.abort();
+        const ctrl = new AbortController();
+        abortRef.current = ctrl;
+        const timer = setTimeout(() => ctrl.abort(), 60000);
+        setLoading(true); setError('');
+        try {
+            const res = await fetch(`${apiBase}/api/ai-report`, {
+                method: 'POST', signal: ctrl.signal, headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    trades: slices.current.map(toPayload), prevTrades: slices.previous.map(toPayload),
+                    accountName, periodLabel, refresh,
+                    startBalance: risk ? risk.startBal : 0, riskPct: risk ? risk.riskPct : 0, dailyLimit: risk ? risk.dailyLimit : 0
+                })
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok || !data || !data.success) throw new Error((data && data.error) || `Server returned ${res.status}`);
+            setReport(data);
+        } catch (e) {
+            setError(e.name === 'AbortError' ? 'The request took too long. Try again in a moment.' : `Could not build the report: ${e.message}`);
+        } finally {
+            clearTimeout(timer); setLoading(false);
+        }
+    };
+
+    // Opens the complete report (KPIs, all charts, insights, evidence) in a clean white page and starts the
+    // print dialog; choose "Save as PDF" as the destination.
+    const savePdf = () => {
+        if (!report || !printRef.current) return;
+        const body = printRef.current.innerHTML.replace(/<details/g, '<details open');
+        const head = Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).map((el) => (el.tagName === 'LINK' ? `<link rel="stylesheet" href="${el.href}">` : el.outerHTML)).join('\n');
+        const title = `MintPip AI Trade Coach - ${accountName} - ${periodLabel}`.replace(/[<>&"]/g, '');
+        const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>${head}
+<style>
+  html,body{background:#fff!important;color:#0f172a}
+  body{margin:0;padding:18px;font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  section,li{break-inside:avoid}
+  @page{size:A4;margin:10mm}
+</style></head><body>
+<h1 style="font-size:22px;font-weight:800;color:#6d28d9;margin:0">AI Trade Coach</h1>
+<p style="font-size:12px;color:#64748b;margin:2px 0 14px">${accountName.replace(/[<>&"]/g, '')} &middot; ${periodLabel} &middot; ${new Date().toLocaleDateString()}</p>
+${body}
+<script>window.onload=function(){setTimeout(function(){window.print()},600)}<\/script>
+</body></html>`;
+        const w = window.open('', '_blank');
+        if (!w) { setError('Your browser blocked the pop-up. Allow pop-ups for this site and press Save as PDF again.'); return; }
+        w.document.open(); w.document.write(html); w.document.close();
+    };
+
+    const panel = isDark ? 'bg-[#0E1426] border-white/15 text-slate-200' : 'bg-white border-slate-200 text-slate-800';
+    const field = isDark ? 'bg-[#141B30] border-[#232C45] text-slate-200' : 'bg-slate-50 border-slate-300 text-slate-800';
+
+    return (
+        <div onClick={onClose} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4">
+            <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="AI Trade Coach" className={`p-5 sm:p-7 rounded-2xl border max-w-5xl w-full relative shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto ${panel}`}>
+                <div className="flex items-center justify-between gap-3 border-b pb-4 border-slate-700/40">
+                    <div>
+                        <h3 className="text-lg font-black text-[#A78BFA]">AI Trade Coach</h3>
+                        <p className="text-xs text-slate-500 mt-0.5">{accountName}. Numbers are calculated by code, the AI explains them.</p>
+                    </div>
+                    <button onClick={onClose} aria-label="Close report" className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 transition flex items-center justify-center font-bold text-sm">✕</button>
+                </div>
+
+                <div className="flex flex-wrap items-end gap-3">
+                    <label className="text-xs text-slate-400 space-y-1">
+                        <span className="block font-semibold">Period</span>
+                        <select value={period} onChange={(e) => setPeriod(e.target.value)} className={`px-3 py-2.5 rounded-xl border text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-violet-500 ${field}`}>
+                            {PERIODS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+                        </select>
+                    </label>
+                    <span className="text-xs text-slate-500 pb-3">{slices.current.length} trade{slices.current.length === 1 ? '' : 's'} in this period</span>
+                    <div className="flex-1" />
+                    <button onClick={() => generate(false)} disabled={loading} className="px-5 py-2.5 rounded-xl bg-[#7C3AED] text-white text-sm font-bold hover:bg-[#6D28D9] disabled:opacity-60 disabled:cursor-wait transition focus:outline-none focus:ring-2 focus:ring-violet-400">
+                        {loading ? 'Building report...' : report ? 'Rebuild report' : 'Generate report'}
+                    </button>
+                </div>
+
+                {error && <div role="alert" className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-sm text-rose-300">{error}</div>}
+
+                {loading && (
+                    <div className="py-10 text-center space-y-2" aria-live="polite">
+                        <div className="mx-auto w-8 h-8 rounded-full border-2 border-violet-500/30 border-t-violet-400 animate-spin" />
+                        <p className="text-sm text-slate-400">Calculating metrics, then asking the AI to explain them. This can take up to 45 seconds.</p>
+                    </div>
+                )}
+
+                {!loading && report && <ReportView report={report} isDark={isDark} />}
+
+                {report && (
+                    <div ref={printRef} aria-hidden="true" style={{ position: 'fixed', left: '-10000px', top: 0, width: '720px', pointerEvents: 'none' }}>
+                        <ReportView report={report} isDark={false} />
+                    </div>
+                )}
+
+                {!loading && !report && !error && (
+                    <div className="py-10 text-center text-sm text-slate-500 space-y-1">
+                        <p>Choose a period and generate the report.</p>
+                        <p className="text-xs">You get KPIs, equity and drawdown curves, rule edge, session and weekday breakdowns, and an evidence-backed action plan.</p>
+                    </div>
+                )}
+
+                {report && !loading && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4 border-slate-700/40">
+                        <div className="flex gap-2">
+                            <button onClick={savePdf} className="px-4 py-2 rounded-xl bg-[#8B5CF6]/10 border border-[#8B5CF6]/30 text-[#A78BFA] hover:bg-[#8B5CF6]/20 transition text-xs font-bold">Save as PDF</button>
+                            <button onClick={() => generate(true)} className="px-4 py-2 rounded-xl border border-slate-600/40 text-slate-400 hover:text-violet-400 transition text-xs font-bold">Ask the AI again</button>
+                        </div>
+                        <button onClick={onClose} className="px-5 py-2 rounded-xl bg-slate-800 text-white text-xs font-bold hover:bg-slate-700 transition">Close</button>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+return AiReportModal;
+})();
+
 
 const ICONS = {
     shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z',
@@ -891,13 +1312,8 @@ export default function App() {
     const [isDetailsOpen, setIsDetailsOpen] = useState(false);
     const [selectedTrade, setSelectedTrade] = useState(null);
 
-    // OpenRouter AI Modal States
+    // AI report modal (state lives inside <AiReportModal />)
     const [isAiOpen, setIsAiOpen] = useState(false);
-    const [aiAnalysisText, setAiAnalysisText] = useState("");
-    const [isAiLoading, setIsAiLoading] = useState(false);
-    const [aiTimeframe, setAiTimeframe] = useState('month');
-    const [aiLang, setAiLang] = useState('sinhala');
-    const [copyBtnText, setCopyBtnText] = useState('Copy Report');
 
     const [activeItems, setActiveItems] = useState([]);
     const [activeImgIndex, setActiveImgIndex] = useState(0);
@@ -1374,8 +1790,8 @@ export default function App() {
             smtDivergence: t.smt || '',
             executionRules: t.rules || [],
             psychologicalState: t.psych || [],
-            entryPrice: t.entryPrice !== null && t.entryPrice !== undefined ? formatPrice5(t.entryPrice, t.pairTag) : '',
-            slPrice: t.slPrice !== null && t.slPrice !== undefined ? formatPrice5(t.slPrice, t.pairTag) : '',
+            entryPrice: t.entryPrice !== null && t.entryPrice !== undefined ? formatPrice5(t.entryPrice) : '',
+            slPrice: t.slPrice !== null && t.slPrice !== undefined ? formatPrice5(t.slPrice) : '',
             lotSizeRisk: t.lotSize !== null && t.lotSize !== undefined ? String(t.lotSize) : '',
             outcome: t.outcomeRaw || t.result,
             profitAmount: t.profitAmount ? String(t.profitAmount) : '',
@@ -1477,8 +1893,8 @@ export default function App() {
                     .forEach(k => editData.append(k, newTradeForm[k] ?? ''));
                 editData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
                 editData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
-                editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice, newTradeForm.pairDirection));
-                editData.append('slPrice', formatPrice5(newTradeForm.slPrice, newTradeForm.pairDirection));
+                editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
+                editData.append('slPrice', formatPrice5(newTradeForm.slPrice));
                 editData.append('accountId', activeDatabase === 'live' ? resolveAccountId() : '');
                 editData.append('beforeCharts', newTradeForm.beforeCharts); // optional new image URL(s)
                 editData.append('afterCharts', newTradeForm.afterCharts);
@@ -1515,8 +1931,8 @@ export default function App() {
             formData.append('session', newTradeForm.session);
             formData.append('fvgTap', newTradeForm.fvgTap);
             formData.append('smtDivergence', newTradeForm.smtDivergence);
-            formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice, newTradeForm.pairDirection));
-            formData.append('slPrice', formatPrice5(newTradeForm.slPrice, newTradeForm.pairDirection));
+            formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
+            formData.append('slPrice', formatPrice5(newTradeForm.slPrice));
             formData.append('planeTarget', newTradeForm.planeTarget);
             formData.append('lotSizeRisk', newTradeForm.lotSizeRisk);
             formData.append('outcome', newTradeForm.outcome);
@@ -2452,120 +2868,6 @@ export default function App() {
         }, 300);
     };
 
-    const generateAiReport = async () => {
-        setIsAiLoading(true);
-        setAiAnalysisText("");
-
-        const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-        if (!apiKey) {
-            setAiAnalysisText("⚠️ OpenRouter API key not found. Add VITE_OPENROUTER_API_KEY=your_key to client/.env.local and restart the client (npm run dev).");
-            setIsAiLoading(false);
-            return;
-        }
-
-        const now = new Date();
-        let targetTrades = trades;
-
-        if (aiTimeframe === 'week') {
-            const weekKey = getWeekStartKey(now);
-            targetTrades = trades.filter(t => tradeDateKey(t) >= weekKey);
-        } else if (aiTimeframe === 'last_week') {
-            const thisWeekKey = getWeekStartKey(now);
-            const prevWeek = new Date(now);
-            prevWeek.setDate(prevWeek.getDate() - 7);
-            const lastWeekKey = getWeekStartKey(prevWeek);
-            targetTrades = trades.filter(t => tradeDateKey(t) >= lastWeekKey && tradeDateKey(t) < thisWeekKey);
-        } else if (aiTimeframe === 'month') {
-            const currentMonthKey = now.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-            targetTrades = trades.filter(t => t.monthYear === currentMonthKey);
-        } else if (aiTimeframe === 'last_month') {
-            const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            const lastMonthKey = lastMonthDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-            targetTrades = trades.filter(t => t.monthYear === lastMonthKey);
-        }
-
-        const tradesSummary = targetTrades.slice(-25) /* latest 25 trades */.map(t => ({
-            date: t.date,
-            pair: t.pair,
-            direction: t.direction,
-            session: t.session,
-            setupScore: t.setupScore,
-            rulesFollowed: t.rules,
-            psychology: t.psych,
-            pnl: t.pnl,
-            result: t.result,
-            lesson: t.note
-        }));
-
-        const languageInstruction = aiLang === 'sinhala'
-            ? "Provide a concise, highly practical performance audit in Sinhala (with English key trading terms like ICT, FVG, MSS, Killzone)."
-            : "Provide a concise, highly practical performance audit entirely in professional English.";
-
-        const prompt = `You are a Senior Institutional Forex Analyst. Analyze the following trade journal data for a Forex trader (${aiTimeframe.toUpperCase()} timeframe):
-
-Total Trades Analyzed: ${targetTrades.length}
-Trades Data: ${JSON.stringify(tradesSummary)}
-
-${languageInstruction} Structure it as follows:
-1. 🎯 **Strengths / ප්‍රධාන ශක්තීන්**:
-2. ⚠️ **Weaknesses & Risk Management / කළ වැරදි සහ අවදානම්**:
-3. 💡 **Trading Psychology & Execution Advice / වැඩිදියුණු කරගත යුතු උපදෙස්**:`;
-
-        // Free model slugs on OpenRouter change often. We try them one by one and use the first that works.
-        // To force a model, set VITE_OPENROUTER_MODEL=... in client/.env.local (it is tried first).
-        const envModel = (import.meta.env.VITE_OPENROUTER_MODEL || '').trim();
-        const modelChain = [envModel, 'openrouter/free', 'meta-llama/llama-3.3-70b-instruct:free', 'google/gemma-3-27b-it:free', 'deepseek/deepseek-chat']
-            .filter((m, i, arr) => m && arr.indexOf(m) === i);
-        let lastError = '';
-
-        try {
-            for (const model of modelChain) {
-                let response;
-                try {
-                    response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                        method: "POST",
-                        headers: {
-                            "Authorization": `Bearer ${apiKey.trim()}`,
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": window.location.origin,
-                            "X-Title": "MintPip Trading Journal"
-                        },
-                        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] })
-                    });
-                } catch (netErr) {
-                    lastError = 'Network error: check your internet connection.';
-                    break;
-                }
-
-                let data = null;
-                try { data = await response.json(); } catch (e) { /* non-JSON body */ }
-
-                if (response.ok) {
-                    const aiOutput = data?.choices?.[0]?.message?.content;
-                    if (aiOutput && aiOutput.trim()) { setAiAnalysisText(aiOutput); return; }
-                    lastError = `${model}: empty answer`;
-                    continue; // try the next model
-                }
-
-                const msg = data?.error?.message || 'Request failed.';
-                lastError = `${model} (${response.status}): ${msg}`;
-                if (response.status === 401) { lastError = 'Invalid OpenRouter API key (401). Check VITE_OPENROUTER_API_KEY in client/.env.local.'; break; }
-                // 402 (credits), 404 (model removed), 429 (rate limit), 5xx -> try the next model
-            }
-            setAiAnalysisText(`⚠️ AI report failed.\n\n${lastError}\n\nTip: add VITE_OPENROUTER_MODEL=<model slug> to client/.env.local (pick a model from openrouter.ai/models) and restart npm run dev.`);
-        } catch (error) {
-            setAiAnalysisText(`⚠️ Unexpected error: ${error.message}`);
-        } finally {
-            setIsAiLoading(false);
-        }
-    };
-
-    const copyReportToClipboard = () => {
-        navigator.clipboard.writeText(aiAnalysisText);
-        setCopyBtnText('Copied! ✓');
-        setTimeout(() => setCopyBtnText('Copy Report'), 2000);
-    };
-
     const getDaysInMonth = (month, year) => new Date(year, month + 1, 0).getDate();
     const getFirstDayOfMonth = (month, year) => {
         let day = new Date(year, month, 1).getDay();
@@ -2931,7 +3233,6 @@ ${languageInstruction} Structure it as follows:
 
                         <button
                             onClick={() => {
-                                setAiAnalysisText("");
                                 setIsAiOpen(true);
                             }}
                             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#8B5CF6] hover:bg-[#A78BFA] text-white text-xs font-bold transition shadow-sm active:scale-95"
@@ -2939,7 +3240,7 @@ ${languageInstruction} Structure it as follows:
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
                             </svg>
-                            <span>AI Report</span>
+                            <span>AI Coach</span>
                         </button>
 
                         <button
@@ -3587,8 +3888,6 @@ ${languageInstruction} Structure it as follows:
                                         <option value="GBP/USD - BUY">GBP/USD - BUY</option>
                                         <option value="EUR/USD - SELL">EUR/USD - SELL</option>
                                         <option value="EUR/USD - BUY">EUR/USD - BUY</option>
-                                        <option value="XAU/USD - SELL">XAU/USD (Gold) - SELL</option>
-                                        <option value="XAU/USD - BUY">XAU/USD (Gold) - BUY</option>
                                     </select>
                                 </div>
                             </div>
@@ -3683,10 +3982,10 @@ ${languageInstruction} Structure it as follows:
                                     <input 
                                         type="number" 
                                         step="0.00001"
-                                        placeholder={isGoldPair(newTradeForm.pairDirection) ? "4155.40" : "1.27450"}
+                                        placeholder="1.27450"
                                         value={newTradeForm.entryPrice} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, entryPrice: e.target.value})}
-                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, entryPrice: formatPrice5(prev.entryPrice, prev.pairDirection) }))}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, entryPrice: formatPrice5(prev.entryPrice) }))}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
@@ -3695,10 +3994,10 @@ ${languageInstruction} Structure it as follows:
                                     <input 
                                         type="number" 
                                         step="0.00001"
-                                        placeholder={isGoldPair(newTradeForm.pairDirection) ? "4149.80" : "1.27600"}
+                                        placeholder="1.27600"
                                         value={newTradeForm.slPrice} 
                                         onChange={(e) => setNewTradeForm({...newTradeForm, slPrice: e.target.value})}
-                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, slPrice: formatPrice5(prev.slPrice, prev.pairDirection) }))}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, slPrice: formatPrice5(prev.slPrice) }))}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
                                 </div>
@@ -3979,141 +4278,17 @@ ${languageInstruction} Structure it as follows:
                 </div>
             )}
 
-            {/* AI Performance Audit Modal */}
-            {isAiOpen && (
-                <div onClick={() => setIsAiOpen(false)} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
-                    <div onClick={(e) => e.stopPropagation()} className={`p-6 sm:p-8 rounded-2xl border max-w-3xl w-full relative shadow-2xl space-y-6 max-h-[85vh] overflow-y-auto ${isDark ? 'bg-[#0E1426] border-white/15 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}>
-
-                        <div className="flex items-center justify-between border-b pb-4 border-slate-700/40">
-                            <h3 className="text-lg font-black flex items-center gap-2.5 text-[#A78BFA]">
-                                <div className="p-2 rounded-xl bg-[#8B5CF6]/10 border border-[#8B5CF6]/20 text-[#A78BFA]">
-                                    <svg className="w-5 h-5 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                    </svg>
-                                </div>
-                                AI Performance Audit & Insights
-                            </h3>
-                            <button onClick={() => setIsAiOpen(false)} className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 transition flex items-center justify-center font-bold text-sm">
-                                ✕
-                            </button>
-                        </div>
-
-                        <div className={`p-4 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-4 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
-                            <div className="flex items-center gap-3 w-full sm:w-auto flex-wrap">
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Timeframe</span>
-                                    <select
-                                        value={aiTimeframe}
-                                        onChange={(e) => setAiTimeframe(e.target.value)}
-                                        className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#0E1426] border-[#8B5CF6]/30 text-[#C4B5FD]' : 'bg-white border-[#C4B5FD] text-[#6D28D9]'}`}
-                                    >
-                                        <option value="week">This Week</option>
-                                        <option value="last_week">Last Week</option>
-                                        <option value="month">This Month</option>
-                                        <option value="last_month">Last Month</option>
-                                        <option value="all">All Trades</option>
-                                    </select>
-                                </div>
-
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Language</span>
-                                    <select
-                                        value={aiLang}
-                                        onChange={(e) => setAiLang(e.target.value)}
-                                        className={`py-2 px-3 rounded-xl border text-xs font-bold focus:outline-none ${isDark ? 'bg-[#0E1426] border-[#8B5CF6]/30 text-[#C4B5FD]' : 'bg-white border-[#C4B5FD] text-[#6D28D9]'}`}
-                                    >
-                                        <option value="sinhala">සිංහල (Sinhala)</option>
-                                        <option value="english">English</option>
-                                    </select>
-                                </div>
-                            </div>
-
-                            <button
-                                onClick={generateAiReport}
-                                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#8B5CF6] hover:bg-[#A78BFA] text-white text-xs font-bold transition shadow-sm active:scale-95 flex items-center justify-center gap-2"
-                            >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                </svg>
-                                Generate Report
-                            </button>
-                        </div>
-
-                        {isAiLoading ? (
-                            <div className="flex flex-col items-center justify-center py-16 space-y-4">
-                                <div className="w-12 h-12 border-4 border-[#8B5CF6] border-t-transparent rounded-full animate-spin"></div>
-                                <p className="text-xs text-[#A78BFA] font-bold animate-pulse tracking-wide">AI is analyzing your trades for the selected period...</p>
-                            </div>
-                        ) : (
-                            <div className={`p-6 rounded-2xl border text-xs sm:text-sm leading-relaxed space-y-4 shadow-inner min-h-[220px] ${isDark ? 'bg-[#141B30]/90 border-[#232C45] text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
-                                {aiAnalysisText ? (
-                                    aiAnalysisText.split('\n').map((line, idx) => {
-                                        const trimmed = line.trim();
-                                        if (!trimmed) return null;
-
-                                        if (trimmed.startsWith('**1.') || trimmed.startsWith('**2.') || trimmed.startsWith('**3.') || trimmed.match(/^\*\*?\d+\./)) {
-                                            return (
-                                                <h4 key={idx} className="text-sm sm:text-base font-black text-[#A78BFA] mt-4 mb-2 flex items-center gap-2 border-b border-[#8B5CF6]/20 pb-2">
-                                                    {trimmed.replace(/\*\*/g, '')}
-                                                </h4>
-                                            );
-                                        }
-
-                                        if (trimmed.startsWith('-') || trimmed.startsWith('*') || trimmed.startsWith('•')) {
-                                            const content = trimmed.replace(/^[-*•]\s*/, '');
-                                            const parts = content.split('**');
-                                            return (
-                                                <div key={idx} className="flex items-start gap-2.5 my-2.5 pl-2">
-                                                    <span className="w-1.5 h-1.5 rounded-full bg-[#A78BFA] mt-2 shrink-0"></span>
-                                                    <div className="flex-1">
-                                                        {parts.length >= 3 ? (
-                                                            <span>
-                                                                <strong className="text-white font-extrabold">{parts[1]}</strong>
-                                                                {parts.slice(2).join('')}
-                                                            </span>
-                                                        ) : (
-                                                            <span>{content.replace(/\*\*/g, '')}</span>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            );
-                                        }
-
-                                        return (
-                                            <p key={idx} className="my-1.5 text-slate-300">
-                                                {trimmed.replace(/\*\*/g, '')}
-                                            </p>
-                                        );
-                                    })
-                                ) : (
-                                    <div className="flex flex-col items-center justify-center py-12 text-center">
-                                        <svg className="w-10 h-10 text-[#A78BFA]/40 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2v-6l9-11h-7z" />
-                                        </svg>
-                                        <p className="text-slate-400 text-xs font-medium">Select your preferred Timeframe and Language above, then click <b>"Generate Report"</b> to start analysis.</p>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        <div className="flex items-center justify-between pt-2">
-                            {aiAnalysisText ? (
-                                <button onClick={copyReportToClipboard} className="px-4 py-2 rounded-xl bg-[#8B5CF6]/10 border border-[#8B5CF6]/30 text-[#A78BFA] hover:bg-[#8B5CF6]/20 transition text-xs font-bold flex items-center gap-1.5">
-                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2v0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                                    </svg>
-                                    {copyBtnText}
-                                </button>
-                            ) : <div></div>}
-
-                            <button onClick={() => setIsAiOpen(false)} className="px-6 py-2.5 rounded-xl bg-[#7C3AED] text-white text-xs font-bold hover:bg-[#6D28D9] transition shadow-lg shadow-[#8B5CF6]/20">
-                                Close Audit
-                            </button>
-                        </div>
-
-                    </div>
-                </div>
-            )}
+            {/* AI performance report (server-side analytics + AI narrative) */}
+            <AiReportModal
+                open={isAiOpen}
+                onClose={() => setIsAiOpen(false)}
+                isDark={isDark}
+                trades={trades}
+                activeDatabase={activeDatabase}
+                activeAcc={activeAcc}
+                risk={risk}
+                apiBase={API_BASE}
+            />
 
             {/* Advanced Trade Details Popup Modal */}
             {isDetailsOpen && selectedTrade && (
@@ -4191,8 +4366,8 @@ ${languageInstruction} Structure it as follows:
                             <div className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
                                 <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-400">Execution Details</h4>
                                 <div className="grid grid-cols-3 gap-3 text-xs">
-                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Entry</span><b>{selectedTrade.entryPrice !== null ? formatPrice5(selectedTrade.entryPrice, selectedTrade.pairTag) : '-'}</b></div>
-                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">SL</span><b>{selectedTrade.slPrice !== null ? formatPrice5(selectedTrade.slPrice, selectedTrade.pairTag) : '-'}</b></div>
+                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Entry</span><b>{selectedTrade.entryPrice !== null ? formatPrice5(selectedTrade.entryPrice) : '-'}</b></div>
+                                    <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">SL</span><b>{selectedTrade.slPrice !== null ? formatPrice5(selectedTrade.slPrice) : '-'}</b></div>
                                     <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Lot size & risk</span><b>{selectedTrade.lotSize !== null ? selectedTrade.lotSize : '-'}</b></div>
                                 </div>
                                 {(selectedTrade.fvgTap || selectedTrade.smt) && (

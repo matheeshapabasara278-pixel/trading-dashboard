@@ -9,21 +9,97 @@ const getDefaultTradeForm = () => ({
     session: '',
     fvgTap: '',
     smtDivergence: '',
+    smtType: '', // 'NO SMT' or HH-LH / LH-HH / HL-LL / LL-HL
+    smtPair: '', // the pair that shows the divergence
     executionRules: [],
     entryPrice: '',
     slPrice: '',
+    tpPrice: '', // take-profit price (required); the RR is calculated from Entry, SL and TP
     planeTarget: '1:2 (0p : 0p)',
     lotSizeRisk: '',
     outcome: '',
     profitAmount: '',
     lossAmount: '',
     psychologicalState: [],
+    setupTags: [], // setup type tags (live trades)
+    mistakes: [], // mistake tags (live trades)
     beforeCharts: '', // optional image links (comma / new line separated)
     afterCharts: '',
     beforeChartFiles: [], // images selected from the computer (multiple allowed)
     afterChartFiles: [],
     note: ''
 });
+
+
+// ---------------------------------------------------------------------------
+// SMT divergence helpers. Stored in MongoDB as one text value, for example
+// "YES (HH-LH) | AUDUSD" or "NO SMT" (so the server and the analytics keep working).
+// ---------------------------------------------------------------------------
+const SMT_TYPES = [
+    { value: 'HH-LH', a: 'HH', b: 'LH', hint: 'Your pair makes a Higher High, the SMT pair makes a Lower High' },
+    { value: 'LH-HH', a: 'LH', b: 'HH', hint: 'Your pair makes a Lower High, the SMT pair makes a Higher High' },
+    { value: 'HL-LL', a: 'HL', b: 'LL', hint: 'Your pair makes a Higher Low, the SMT pair makes a Lower Low' },
+    { value: 'LL-HL', a: 'LL', b: 'HL', hint: 'Your pair makes a Lower Low, the SMT pair makes a Higher Low' }
+];
+// DXY moves the OPPOSITE way to GBPUSD/EURUSD, so its divergence types are mirrored (same order as SMT_TYPES):
+// your pair sweeps a high -> DXY should have swept a low; the divergence is that DXY fails to do it.
+const SMT_TYPES_DXY = [
+    { value: 'HH-HL', a: 'HH', b: 'HL', hint: 'Your pair makes a Higher High, but DXY fails to make a Lower Low (it makes a Higher Low)' },
+    { value: 'LH-LL', a: 'LH', b: 'LL', hint: 'Your pair fails to make a Higher High (Lower High), but DXY makes a Lower Low' },
+    { value: 'HL-HH', a: 'HL', b: 'HH', hint: 'Your pair fails to make a Lower Low (Higher Low), but DXY makes a Higher High' },
+    { value: 'LL-LH', a: 'LL', b: 'LH', hint: 'Your pair makes a Lower Low, but DXY fails to make a Higher High (it makes a Lower High)' }
+];
+const isDxy = (p) => String(p || '').toUpperCase() === 'DXY';
+const smtTypesFor = (pair) => (isDxy(pair) ? SMT_TYPES_DXY : SMT_TYPES);
+const SMT_PAIRS = ['AUDUSD', 'XAUUSD', 'GBPUSD', 'EURUSD', 'XAGUSD']; // only used to edit very old trades on other pairs
+// You trade GBPUSD and EURUSD, and they are each other's SMT pair: GBPUSD trade -> SMT with EURUSD, EURUSD trade -> SMT with GBPUSD
+const autoSmtPair = (tradePair) => ({ GBPUSD: 'EURUSD', EURUSD: 'GBPUSD' }[String(tradePair || '').toUpperCase().replace(/[^A-Z0-9]/g, '')] || '');
+const prettyPair = (p) => {
+    const k = String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return /^[A-Z]{6}$/.test(k) ? `${k.slice(0, 3)}/${k.slice(3)}` : String(p || '');
+};
+// "GBP/USD - SELL" -> "GBPUSD"
+const tradePairKey = (pairDirection) => String(pairDirection || '').split(' - ')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Text saved in the database -> { none, type, pair, legacy }
+const parseSmt = (raw) => {
+    const t = String(raw || '').trim();
+    if (!t) return { none: false, type: '', pair: '', legacy: false };
+    if (/^NO/i.test(t)) return { none: true, type: '', pair: '', legacy: false };
+    const m = t.match(/\((HH|LH|HL|LL)\s*-\s*(HH|LH|HL|LL)\)\s*(?:\|\s*([A-Z0-9/]+))?/i);
+    if (m) return { none: false, type: `${m[1]}-${m[2]}`.toUpperCase(), pair: String(m[3] || '').toUpperCase().replace(/[^A-Z0-9]/g, ''), legacy: false };
+    // Old format: "YES (GU HH & EU LH)"
+    const old = t.match(/\(\s*\w+\s+(HH|LH|HL|LL)\s*&\s*\w+\s+(HH|LH|HL|LL)\s*\)/i);
+    if (old) return { none: false, type: `${old[1]}-${old[2]}`.toUpperCase(), pair: '', legacy: true };
+    return { none: false, type: '', pair: '', legacy: true };
+};
+// Form fields -> text saved in the database
+const buildSmt = (f) => {
+    if (f.smtType === 'NO SMT') return 'NO SMT';
+    const pair = isDxy(f.smtPair) ? 'DXY' : (autoSmtPair(String(f.pairDirection || '').split(' - ')[0]) || f.smtPair);
+    if (f.smtType && pair) return `YES (${f.smtType}) | ${pair}`;
+    return '';
+};
+// Visual summary: "GBP/USD HH  <->  EUR/USD LH"
+const SmtSummary = ({ isDark, tradePair, type, smtPair, compact }) => {
+    const info = [...SMT_TYPES, ...SMT_TYPES_DXY].find(x => x.value === type);
+    if (!info) return null;
+    const hi = info.a.endsWith('H');
+    const colA = info.a === 'HH' || info.a === 'HL' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' : 'text-rose-400 border-rose-500/30 bg-rose-500/10';
+    const colB = info.b === 'HH' || info.b === 'HL' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' : 'text-rose-400 border-rose-500/30 bg-rose-500/10';
+    const Chip = ({ label, tag, cls }) => (
+        <div className={`flex-1 min-w-0 rounded-xl border px-3 ${compact ? 'py-1.5' : 'py-2'} ${cls}`}>
+            <div className="text-[10px] uppercase font-bold opacity-70 truncate">{label}</div>
+            <div className="text-sm font-extrabold">{tag} <span className="text-[10px] font-semibold opacity-70">{tag === 'HH' ? 'Higher High' : tag === 'LH' ? 'Lower High' : tag === 'HL' ? 'Higher Low' : 'Lower Low'}</span></div>
+        </div>
+    );
+    return (
+        <div className="flex items-center gap-2">
+            <Chip label={tradePair ? `${prettyPair(tradePair)} (your trade)` : 'Your trade pair'} tag={info.a} cls={colA} />
+            <span className="text-slate-400 font-extrabold text-sm shrink-0" title={hi ? 'Highs diverge' : 'Lows diverge'}>⇄</span>
+            <Chip label={smtPair ? `${prettyPair(smtPair)} (SMT pair)` : 'SMT pair'} tag={info.b} cls={colB} />
+        </div>
+    );
+};
 
 // Always show prices with 5 decimals (1.3 -> 1.30000). Returns '' for empty / invalid input
 const formatPrice5 = (value) => {
@@ -44,14 +120,22 @@ const getPipSize = (pairDirection) => {
     return 0.0001;
 };
 
-// Builds "1:2 (SLp : TPp)" from entry + SL prices (fixed 1:2 risk-reward). Falls back to 0p : 0p
-const buildPlaneTarget = (entry, sl, pairDirection) => {
+// Builds "1:RR (SLp : TPp)" from Entry + SL (+ optional TP price).
+// With a TP price the real risk:reward is calculated (|TP - Entry| / |Entry - SL|). Without a TP it falls back to 1:2.
+const buildPlaneTarget = (entry, sl, pairDirection, tp) => {
     const e = parseFloat(entry);
     const l = parseFloat(sl);
     if (!Number.isFinite(e) || !Number.isFinite(l)) return '1:2 (0p : 0p)';
-    const slPips = Math.abs(e - l) / getPipSize(pairDirection);
+    const pip = getPipSize(pairDirection);
+    const slDist = Math.abs(e - l);
+    const slPips = slDist / pip;
+    const t = parseFloat(tp);
+    const hasTp = String(tp ?? '').trim() !== '' && Number.isFinite(t) && slDist > 0;
+    const rr = hasTp ? Math.abs(t - e) / slDist : 2;
+    const tpPips = hasTp ? Math.abs(t - e) / pip : slPips * 2;
     const fmt = (n) => String(parseFloat(n.toFixed(1))); // 8.95 -> "9", 20.0 -> "20"
-    return `1:2 (${fmt(slPips)}p : ${fmt(slPips * 2)}p)`;
+    const fmtRR = (n) => String(parseFloat(n.toFixed(2))); // 2.4567 -> "2.46", 2.00 -> "2"
+    return `1:${fmtRR(rr)} (${fmt(slPips)}p : ${fmt(tpPips)}p)`;
 };
 
 // ---------------------------------------------------------------------------
@@ -190,6 +274,1022 @@ function StatTile({ label, value, sub, tone = 'neutral', isDark }) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Edge Lab (live accounts only): setup tags, mistake tracker, SMT analysis, heatmaps, planned vs actual RR,
+// Monte Carlo, position size calculator, weekly / monthly review, daily checklist, revenge-trade warning, CSV export.
+// Wrapped in a function so its helper names cannot clash with the rest of this file.
+// ---------------------------------------------------------------------------
+const { EdgeLab, TagPicker, ChecklistGate, RevengeBanner, revengeInfo, tradesToCsv, downloadCsv, checklistDoneToday, checklistOff, setChecklistOff, SETUP_PRESETS, MISTAKE_PRESETS } = (() => {
+    const SETUP_PRESETS = ['Silver Bullet', 'FVG tap', 'Order Block', 'Liquidity sweep', 'Breaker block', 'London open', 'NY open', 'News day'];
+    const MISTAKE_PRESETS = ['Early entry', 'Moved SL', 'Revenge trade', 'Overtraded', 'No confirmation', 'Oversized lot', 'Closed too early', 'Ignored bias', 'FOMO entry'];
+
+    // ---- small helpers ----
+    const lsGet = (k, d) => { try { const v = window.localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (_) { return d; } };
+    const lsSet = (k, v) => { try { window.localStorage.setItem(k, JSON.stringify(v)); } catch (_) { /* storage unavailable */ } };
+    const mean = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0);
+    const money = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: Math.abs(v) < 100 ? 2 : 0 })}`;
+    const moneyS = (v) => `${v < 0 ? '-' : '+'}${money(Math.abs(v))}`;
+    const pctOf = (a, b) => (b ? (a / b) * 100 : 0);
+    const plannedRR = (t) => { const m = String(t.rr || '').match(/1\s*:\s*(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : null; };
+    const oneRof = (trades, risk) => {
+        if (risk && risk.startBal > 0 && risk.riskPct > 0) return (risk.startBal * risk.riskPct) / 100;
+        const losses = trades.filter((t) => t.result === 'Loss').map((t) => Math.abs(t.pnl)).filter(Boolean);
+        return losses.length ? mean(losses) : 0;
+    };
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const dkey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+
+    // Groups trades by one or many keys (a trade can sit in several groups, e.g. several setup tags)
+    function groupBy(trades, keyFn) {
+        const map = new Map();
+        trades.forEach((t) => { [].concat(keyFn(t)).filter(Boolean).forEach((k) => { if (!map.has(k)) map.set(k, []); map.get(k).push(t); }); });
+        return [...map.entries()].map(([label, arr]) => {
+            const wins = arr.filter((t) => t.result === 'Win').length;
+            const net = arr.reduce((s, t) => s + t.pnl, 0);
+            return { label, n: arr.length, wins, winRate: pctOf(wins, arr.length), net, avg: net / arr.length, trades: arr };
+        });
+    }
+    const smtKey = (t) => { const p = parseSmt(t.smt); return p.none ? 'NO SMT' : p.type || 'Not recorded'; };
+    const smtPairKey = (t) => { const p = parseSmt(t.smt); return p.none ? 'NO SMT' : p.pair ? `with ${p.pair}` : 'Not recorded'; };
+
+    const PERIODS = [['all', 'All time'], ['week', 'This week'], ['month', 'This month'], ['last_month', 'Last month'], ['last_30', 'Last 30 days']];
+    function periodFilter(trades, key, now = new Date()) {
+        if (key === 'all') return trades;
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        let from, to = '9999-12-31';
+        if (key === 'week') from = dkey(addDays(today, -((today.getDay() + 6) % 7)));
+        else if (key === 'month') from = dkey(new Date(today.getFullYear(), today.getMonth(), 1));
+        else if (key === 'last_month') { from = dkey(new Date(today.getFullYear(), today.getMonth() - 1, 1)); to = dkey(new Date(today.getFullYear(), today.getMonth(), 0)); }
+        else from = dkey(addDays(today, -29));
+        return trades.filter((t) => { const d = tradeDateKey(t); return d && d >= from && d <= to; });
+    }
+
+    // ---- shared UI bits ----
+    const cardCls = (isDark) => `p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-white border-slate-200'}`;
+    const strongCls = (isDark) => (isDark ? 'text-white' : 'text-slate-900');
+    const mutedCls = 'text-slate-500';
+    const inputCls = (isDark) => `px-3 py-2 rounded-xl border text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-violet-500 ${isDark ? 'bg-[#141B30] border-[#232C45] text-slate-200' : 'bg-slate-50 border-slate-300 text-slate-800'}`;
+
+    function Section({ title, sub, isDark, right, children }) {
+        return (
+            <section className={cardCls(isDark)}>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                        <h4 className={`text-sm font-bold ${strongCls(isDark)}`}>{title}</h4>
+                        {sub && <p className="text-[11px] text-slate-500 mt-0.5">{sub}</p>}
+                    </div>
+                    {right}
+                </div>
+                {children}
+            </section>
+        );
+    }
+    const Empty = ({ children }) => <p className="text-xs text-slate-500 py-2">{children}</p>;
+    function Tile({ label, value, sub, tone, isDark }) {
+        const c = tone === 'good' ? 'text-emerald-400' : tone === 'bad' ? 'text-rose-400' : strongCls(isDark);
+        return (
+            <div className={`p-4 rounded-2xl border ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-white border-slate-200'}`}>
+                <span className="text-slate-400 text-[11px] font-semibold block">{label}</span>
+                <span className={`text-xl font-black mt-1 block ${c}`}>{value}</span>
+                {sub && <span className="text-[11px] text-slate-500 block mt-0.5">{sub}</span>}
+            </div>
+        );
+    }
+    function StatTable({ rows, isDark, firstCol, minN = 1, cost }) {
+        if (!rows.length) return <Empty>Not enough data yet.</Empty>;
+        const maxAbs = Math.max(...rows.map((r) => Math.abs(r.net)), 1);
+        return (
+            <div className="overflow-x-auto">
+                <table className="w-full text-xs min-w-[420px]">
+                    <thead><tr className="text-slate-500 text-left"><th className="py-1.5 pr-2 font-semibold">{firstCol}</th><th className="py-1.5 px-2 font-semibold text-right">Trades</th><th className="py-1.5 px-2 font-semibold text-right">Win rate</th><th className="py-1.5 pl-2 font-semibold text-right">{cost ? 'P&L when it happened' : 'Net P&L'}</th></tr></thead>
+                    <tbody>
+                        {rows.map((r) => (
+                            <tr key={r.label} className={`border-t ${isDark ? 'border-white/10' : 'border-slate-200'} ${r.n < minN ? 'opacity-60' : ''}`}>
+                                <td className="py-2 pr-2">
+                                    <div className={`font-semibold ${strongCls(isDark)}`}>{r.label}</div>
+                                    <div className={`h-1 mt-1 rounded-full ${isDark ? 'bg-white/10' : 'bg-slate-200'}`}><div className={`h-full rounded-full ${r.net >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ width: `${Math.max(3, (Math.abs(r.net) / maxAbs) * 100)}%` }} /></div>
+                                </td>
+                                <td className="py-2 px-2 text-right text-slate-400">{r.n}{r.n < 5 ? ' *' : ''}</td>
+                                <td className="py-2 px-2 text-right text-slate-300">{r.winRate.toFixed(0)}%</td>
+                                <td className={`py-2 pl-2 text-right font-bold ${r.net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{moneyS(r.net)}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                <p className="text-[11px] text-slate-500 mt-1">* fewer than 5 trades, treat as a hint only.</p>
+            </div>
+        );
+    }
+    function Heat({ rowsKey, colsKey, trades, isDark, rowLabel }) {
+        const rowVals = [...new Set(trades.map(rowsKey).filter(Boolean))].sort();
+        const colVals = [...new Set(trades.map(colsKey).filter(Boolean))].sort();
+        if (!rowVals.length || !colVals.length) return <Empty>Not enough data yet.</Empty>;
+        const cells = {};
+        let maxAbs = 1;
+        rowVals.forEach((r) => colVals.forEach((c) => {
+            const arr = trades.filter((t) => rowsKey(t) === r && colsKey(t) === c);
+            if (arr.length) { const net = arr.reduce((s, t) => s + t.pnl, 0); cells[`${r}|${c}`] = { n: arr.length, wr: pctOf(arr.filter((t) => t.result === 'Win').length, arr.length), net }; maxAbs = Math.max(maxAbs, Math.abs(net)); }
+        }));
+        return (
+            <div className="overflow-x-auto">
+                <table className="text-xs border-separate border-spacing-1 min-w-[420px]">
+                    <thead><tr><th className="text-left text-slate-500 font-semibold pr-2">{rowLabel}</th>{colVals.map((c) => <th key={c} className="text-slate-500 font-semibold px-1 whitespace-nowrap">{c}</th>)}</tr></thead>
+                    <tbody>
+                        {rowVals.map((r) => (
+                            <tr key={r}>
+                                <td className={`pr-2 font-semibold whitespace-nowrap ${strongCls(isDark)}`}>{r}</td>
+                                {colVals.map((c) => {
+                                    const x = cells[`${r}|${c}`];
+                                    if (!x) return <td key={c} className={`rounded-lg text-center text-slate-600 px-2 py-2 ${isDark ? 'bg-white/5' : 'bg-slate-100'}`}>-</td>;
+                                    const a = 0.15 + 0.55 * (Math.abs(x.net) / maxAbs);
+                                    return (
+                                        <td key={c} title={`${r} / ${c}: ${x.n} trades, ${x.wr.toFixed(0)}% wins, ${moneyS(x.net)}`} className={`rounded-lg text-center px-2 py-2 min-w-[64px] ${x.n < 3 ? 'opacity-60' : ''}`} style={{ background: x.net >= 0 ? `rgba(16,185,129,${a})` : `rgba(244,63,94,${a})` }}>
+                                            <div className={`font-bold ${strongCls(isDark)}`}>{x.wr.toFixed(0)}%</div>
+                                            <div className="text-[10px] text-slate-300">{x.n} trade{x.n === 1 ? '' : 's'}</div>
+                                        </td>
+                                    );
+                                })}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                <p className="text-[11px] text-slate-500 mt-1">Number = win rate. Green = net profit, red = net loss. Faded cells have under 3 trades.</p>
+            </div>
+        );
+    }
+
+    // ---- Monte Carlo ----
+    function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const pick = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)))];
+    function simulate(pnls, steps, sims, seed, ddLimit) {
+        const rnd = mulberry32(seed), n = pnls.length;
+        const cols = Array.from({ length: steps + 1 }, () => new Float64Array(sims));
+        const maxDD = new Float64Array(sims), streak = new Float64Array(sims);
+        for (let s = 0; s < sims; s++) {
+            let eq = 0, peak = 0, dd = 0, run = 0, maxRun = 0;
+            for (let i = 1; i <= steps; i++) {
+                const v = pnls[Math.floor(rnd() * n)];
+                eq += v; if (eq > peak) peak = eq; if (peak - eq > dd) dd = peak - eq;
+                cols[i][s] = eq;
+                if (v < 0) { run++; if (run > maxRun) maxRun = run; } else run = 0;
+            }
+            maxDD[s] = dd; streak[s] = maxRun;
+        }
+        const band = { p5: [0], p25: [0], p50: [0], p75: [0], p95: [0] };
+        for (let i = 1; i <= steps; i++) { const so = Array.from(cols[i]).sort((a, b) => a - b); band.p5.push(pick(so, 0.05)); band.p25.push(pick(so, 0.25)); band.p50.push(pick(so, 0.5)); band.p75.push(pick(so, 0.75)); band.p95.push(pick(so, 0.95)); }
+        const dd = Array.from(maxDD).sort((a, b) => a - b), st = Array.from(streak).sort((a, b) => a - b);
+        const fin = Array.from(cols[steps]);
+        return {
+            band, finalP5: band.p5[steps], finalP50: band.p50[steps], finalP95: band.p95[steps],
+            probProfit: pctOf(fin.filter((v) => v > 0).length, sims), ddP50: pick(dd, 0.5), ddP95: pick(dd, 0.95), streakP95: pick(st, 0.95),
+            probBreach: ddLimit > 0 ? pctOf(dd.filter((v) => v >= ddLimit).length, sims) : null
+        };
+    }
+    function FanChart({ band, isDark }) {
+        const w = 640, h = 190, pL = 52, pR = 8, pT = 10, pB = 10;
+        const n = band.p50.length;
+        const all = [...band.p5, ...band.p95, 0];
+        const min = Math.min(...all), max = Math.max(...all), span = max - min || 1;
+        const x = (i) => pL + (i / (n - 1)) * (w - pL - pR), y = (v) => pT + (1 - (v - min) / span) * (h - pT - pB);
+        const poly = (hi, lo) => `${hi.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')} ${lo.map((v, i) => [x(i), y(v)]).reverse().map(([a, b]) => `${a.toFixed(1)},${b.toFixed(1)}`).join(' ')}`;
+        const line = (arr) => arr.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+        const txt = isDark ? '#94A3B8' : '#64748B';
+        const cmp = (v) => `${v < 0 ? '-' : ''}$${Math.abs(v) >= 1000 ? `${(Math.abs(v) / 1000).toFixed(1)}k` : Math.round(Math.abs(v))}`;
+        return (
+            <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto" role="img" aria-label="Monte Carlo equity paths">
+                <line x1={pL} x2={w - pR} y1={y(0)} y2={y(0)} stroke={isDark ? 'rgba(255,255,255,0.2)' : 'rgba(15,23,42,0.25)'} strokeDasharray="4 4" />
+                <polygon points={poly(band.p95, band.p5)} fill="#8B5CF6" opacity="0.14" />
+                <polygon points={poly(band.p75, band.p25)} fill="#8B5CF6" opacity="0.25" />
+                <polyline points={line(band.p50)} fill="none" stroke="#A78BFA" strokeWidth="2" />
+                <text x={pL - 6} y={y(max) + 4} textAnchor="end" fontSize="11" fill={txt}>{cmp(max)}</text>
+                <text x={pL - 6} y={y(0) + 4} textAnchor="end" fontSize="11" fill={txt}>$0</text>
+                {min < 0 && <text x={pL - 6} y={y(min) + 4} textAnchor="end" fontSize="11" fill={txt}>{cmp(min)}</text>}
+            </svg>
+        );
+    }
+    function MonteCarlo({ trades, risk, isDark }) {
+        const [steps, setSteps] = useState(100);
+        const [seed, setSeed] = useState(1);
+        const pnls = useMemo(() => trades.map((t) => t.pnl), [trades]);
+        const res = useMemo(() => (pnls.length >= 10 ? simulate(pnls, Math.max(10, Math.min(300, steps)), 1000, seed * 7919, risk ? risk.ddLimit : 0) : null), [pnls, steps, seed, risk]);
+        return (
+            <Section isDark={isDark} title="Monte Carlo simulation" sub="Re-plays your own results in random order 1,000 times to show the range of what the next trades could do"
+                right={<div className="flex items-center gap-2"><label className="text-[11px] text-slate-400">Next trades <input type="number" min="10" max="300" value={steps} onChange={(e) => setSteps(parseInt(e.target.value, 10) || 100)} className={`w-16 ml-1 ${inputCls(isDark)}`} /></label><button type="button" onClick={() => setSeed((s) => s + 1)} className="px-3 py-2 rounded-xl border border-slate-600/40 text-slate-400 hover:text-violet-400 text-xs font-bold">Run again</button></div>}>
+                {!res ? <Empty>Needs at least 10 trades in this period. You have {pnls.length}.</Empty> : (
+                    <>
+                        <FanChart band={res.band} isDark={isDark} />
+                        <p className="text-[11px] text-slate-500">Line = median path. Dark band = middle 50% of outcomes, light band = middle 90%.</p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <Tile isDark={isDark} label="Median result" value={moneyS(res.finalP50)} tone={res.finalP50 >= 0 ? 'good' : 'bad'} sub={`after ${Math.max(10, Math.min(300, steps))} trades`} />
+                            <Tile isDark={isDark} label="Bad luck case (5%)" value={moneyS(res.finalP5)} tone={res.finalP5 >= 0 ? 'good' : 'bad'} sub={`Good luck case ${moneyS(res.finalP95)}`} />
+                            <Tile isDark={isDark} label="Chance of profit" value={`${res.probProfit.toFixed(0)}%`} tone={res.probProfit >= 60 ? 'good' : res.probProfit < 45 ? 'bad' : 'neutral'} />
+                            <Tile isDark={isDark} label="Worst drawdown (95%)" value={money(res.ddP95)} tone="neutral" sub={`Typical ${money(res.ddP50)}, longest losing run ${res.streakP95}`} />
+                        </div>
+                        {res.probBreach !== null && <p className={`text-xs font-semibold ${res.probBreach > 20 ? 'text-rose-400' : res.probBreach > 5 ? 'text-amber-400' : 'text-emerald-400'}`}>Chance of a drawdown of {money(risk.ddLimit)} or more (this account's max drawdown limit, measured from the peak): {res.probBreach.toFixed(1)}%.</p>}
+                    </>
+                )}
+            </Section>
+        );
+    }
+
+    // ---- Position size calculator ----
+    const PAIR_PRESETS = {
+        EURUSD: { pip: '0.0001', val: 10, note: '$10 per pip per 1.00 lot' }, GBPUSD: { pip: '0.0001', val: 10, note: '$10 per pip per 1.00 lot' },
+        AUDUSD: { pip: '0.0001', val: 10, note: '$10 per pip per 1.00 lot' }, NZDUSD: { pip: '0.0001', val: 10, note: '$10 per pip per 1.00 lot' },
+        XAUUSD: { pip: '0.1', val: 10, note: '1 pip = $0.10 move, 100 oz contract = $10 per pip per lot' },
+        XAGUSD: { pip: '0.01', val: 50, note: '1 pip = $0.01 move, 5,000 oz contract = $50 per pip per lot (check your broker)' },
+        USDJPY: { pip: '0.01', quote: 'JPY', base: 1000, note: '1,000 JPY per pip per lot, converted at the price' },
+        USDCAD: { pip: '0.0001', quote: 'CAD', base: 10, note: '10 CAD per pip per lot, converted at the price' },
+        USDCHF: { pip: '0.0001', quote: 'CHF', base: 10, note: '10 CHF per pip per lot, converted at the price' }
+    };
+    function Calculator({ acc, risk, isDark }) {
+        const [pair, setPair] = useState('EURUSD');
+        const [balance, setBalance] = useState(String(acc && acc.startBalance ? acc.startBalance : (risk && risk.startBal) || ''));
+        const [riskPct, setRiskPct] = useState(String(risk && risk.riskPct ? risk.riskPct : 1));
+        const [sl, setSl] = useState('');
+        const [price, setPrice] = useState('150');
+        const [override, setOverride] = useState('');
+        const p = PAIR_PRESETS[pair];
+        const autoVal = p.quote ? p.base / (parseFloat(price) || 1) : p.val;
+        const pipVal = parseFloat(override) > 0 ? parseFloat(override) : autoVal;
+        const riskUsd = (parseFloat(balance) || 0) * (parseFloat(riskPct) || 0) / 100;
+        const slN = parseFloat(sl) || 0;
+        const rawLots = slN > 0 && pipVal > 0 ? riskUsd / (slN * pipVal) : 0;
+        const lots = Math.floor(rawLots * 100) / 100;
+        const realRisk = lots * slN * pipVal;
+        const F = ({ label, children }) => <label className="text-[11px] text-slate-400 space-y-1 block"><span className="font-semibold block">{label}</span>{children}</label>;
+        return (
+            <Section isDark={isDark} title="Position size calculator" sub="Risk % and stop loss in pips give you the lot size">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <F label="Pair"><select value={pair} onChange={(e) => setPair(e.target.value)} className={`w-full ${inputCls(isDark)}`}>{Object.keys(PAIR_PRESETS).map((k) => <option key={k} value={k}>{k}</option>)}</select></F>
+                    <F label="Account balance ($)"><input type="number" value={balance} onChange={(e) => setBalance(e.target.value)} className={`w-full ${inputCls(isDark)}`} /></F>
+                    <F label="Risk per trade (%)"><input type="number" step="0.05" value={riskPct} onChange={(e) => setRiskPct(e.target.value)} className={`w-full ${inputCls(isDark)}`} /></F>
+                    <F label={`Stop loss (pips, 1 pip = ${p.pip})`}><input type="number" value={sl} onChange={(e) => setSl(e.target.value)} placeholder="e.g. 12" className={`w-full ${inputCls(isDark)}`} /></F>
+                    {p.quote && <F label={`Current price of ${pair}`}><input type="number" value={price} onChange={(e) => setPrice(e.target.value)} className={`w-full ${inputCls(isDark)}`} /></F>}
+                    <F label="Pip value per 1 lot ($, optional override)"><input type="number" value={override} onChange={(e) => setOverride(e.target.value)} placeholder={autoVal.toFixed(2)} className={`w-full ${inputCls(isDark)}`} /></F>
+                </div>
+                <div className={`p-4 rounded-xl border grid grid-cols-3 gap-3 ${isDark ? 'bg-[#0E1426] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+                    <div><span className="text-[11px] text-slate-400 block">Lot size</span><span className="text-2xl font-black text-violet-400">{lots > 0 ? lots.toFixed(2) : '-'}</span></div>
+                    <div><span className="text-[11px] text-slate-400 block">Risk allowed</span><span className={`text-lg font-black ${strongCls(isDark)}`}>{money(riskUsd)}</span></div>
+                    <div><span className="text-[11px] text-slate-400 block">Real risk at that lot</span><span className={`text-lg font-black ${strongCls(isDark)}`}>{lots > 0 ? money(realRisk) : '-'}</span></div>
+                </div>
+                {slN > 0 && lots === 0 && <p className="text-xs text-amber-400 font-semibold">The stop loss is too wide for this risk: even 0.01 lot would risk more than allowed.</p>}
+                <p className="text-[11px] text-slate-500">Assumes an account in USD. {p.note}. Always check the contract size and pip value in your own broker.</p>
+            </Section>
+        );
+    }
+
+    // ---- Weekly / monthly review ----
+    function Review({ trades, acc, isDark }) {
+        const [kind, setKind] = useState('week');
+        const [offset, setOffset] = useState(0);
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        let from, to, label;
+        if (kind === 'week') {
+            const mon = addDays(today, -((today.getDay() + 6) % 7) + offset * 7);
+            from = dkey(mon); to = dkey(addDays(mon, 6)); label = `Week of ${from}`;
+        } else {
+            const first = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+            from = dkey(first); to = dkey(new Date(first.getFullYear(), first.getMonth() + 1, 0)); label = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        }
+        const list = useMemo(() => trades.filter((t) => { const d = tradeDateKey(t); return d >= from && d <= to; }), [trades, from, to]);
+        const storeKey = `mintpip_review_${acc ? acc.id : 'all'}_${kind}_${from}`;
+        const [notes, setNotes] = useState({ well: '', focus: '' });
+        useEffect(() => { setNotes(lsGet(storeKey, { well: '', focus: '' })); }, [storeKey]);
+        const setNote = (k, v) => { const next = { ...notes, [k]: v }; setNotes(next); lsSet(storeKey, next); };
+
+        const lines = useMemo(() => {
+            if (!list.length) return [];
+            const wins = list.filter((t) => t.result === 'Win').length, net = list.reduce((s, t) => s + t.pnl, 0);
+            const out = [`${list.length} trades, ${pctOf(wins, list.length).toFixed(0)}% win rate, net ${moneyS(net)}.`];
+            const days = groupBy(list, (t) => tradeDateKey(t)).sort((a, b) => b.net - a.net);
+            if (days.length > 1) out.push(`Best day ${days[0].label} (${moneyS(days[0].net)}), worst day ${days[days.length - 1].label} (${moneyS(days[days.length - 1].net)}).`);
+            const setups = groupBy(list, (t) => t.setupTags || []).filter((r) => r.n >= 2).sort((a, b) => b.net - a.net);
+            if (setups.length) out.push(`Best setup: ${setups[0].label} (${setups[0].n} trades, ${moneyS(setups[0].net)}).`);
+            const mis = groupBy(list, (t) => t.mistakes || []).sort((a, b) => b.n - a.n);
+            if (mis.length) out.push(`Most frequent mistake: ${mis[0].label} (${mis[0].n} times, ${moneyS(mis[0].net)} on those trades).`);
+            else if (list.some((t) => (t.setupTags || []).length || (t.mistakes || []).length)) out.push('No mistakes were logged this period.');
+            const scored = list.filter((t) => t.rules && t.rules.length);
+            if (scored.length) {
+                out.push(`On average ${mean(scored.map((t) => t.rules.length)).toFixed(1)} of ${RULE_NAMES.length} rules were followed.`);
+                const worstRule = RULE_NAMES.map((r) => ({ r, k: pctOf(scored.filter((t) => t.rules.includes(r)).length, scored.length) })).sort((a, b) => a.k - b.k)[0];
+                if (worstRule.k < 80) out.push(`Most skipped rule: ${worstRule.r} (followed on ${worstRule.k.toFixed(0)}% of trades).`);
+            }
+            let run = 0, maxRun = 0; list.forEach((t) => { if (t.result === 'Loss') { run++; maxRun = Math.max(maxRun, run); } else run = 0; });
+            if (maxRun >= 3) out.push(`Longest losing streak: ${maxRun} trades.`);
+            return out;
+        }, [list]);
+        const [copied, setCopied] = useState(false);
+        const copy = () => { const text = [`Review: ${label}`, ...lines.map((l) => `- ${l}`), '', `Went well: ${notes.well}`, `Focus next ${kind}: ${notes.focus}`].join('\n'); try { navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1800); }); } catch (_) { /* ignore */ } };
+        return (
+            <Section isDark={isDark} title="Weekly / monthly review" sub="Automatic summary plus your own notes (saved in this browser)"
+                right={<div className="flex items-center gap-2">
+                    <select value={kind} onChange={(e) => { setKind(e.target.value); setOffset(0); }} className={inputCls(isDark)}><option value="week">Weekly</option><option value="month">Monthly</option></select>
+                    <button type="button" onClick={() => setOffset((o) => o - 1)} aria-label="Previous period" className="px-3 py-2 rounded-xl border border-slate-600/40 text-slate-400 hover:text-violet-400 text-xs font-bold">&lt;</button>
+                    <button type="button" onClick={() => setOffset((o) => Math.min(0, o + 1))} disabled={offset >= 0} aria-label="Next period" className="px-3 py-2 rounded-xl border border-slate-600/40 text-slate-400 hover:text-violet-400 text-xs font-bold disabled:opacity-40">&gt;</button>
+                </div>}>
+                <p className={`text-sm font-bold ${strongCls(isDark)}`}>{label} <span className="text-xs text-slate-500 font-normal">({from} to {to})</span></p>
+                {lines.length === 0 ? <Empty>No trades in this period.</Empty> : <ul className="space-y-1.5 list-disc pl-5 text-[13px] text-slate-300">{lines.map((l, i) => <li key={i} className={isDark ? '' : 'text-slate-700'}>{l}</li>)}</ul>}
+                <div className="grid md:grid-cols-2 gap-3">
+                    <label className="text-[11px] text-slate-400 space-y-1 block"><span className="font-semibold block">What went well</span><textarea rows="3" value={notes.well} onChange={(e) => setNote('well', e.target.value)} className={`w-full ${inputCls(isDark)}`} /></label>
+                    <label className="text-[11px] text-slate-400 space-y-1 block"><span className="font-semibold block">Focus for next {kind}</span><textarea rows="3" value={notes.focus} onChange={(e) => setNote('focus', e.target.value)} className={`w-full ${inputCls(isDark)}`} /></label>
+                </div>
+                <button type="button" onClick={copy} className="px-4 py-2 rounded-xl bg-[#8B5CF6]/10 border border-[#8B5CF6]/30 text-[#A78BFA] hover:bg-[#8B5CF6]/20 text-xs font-bold">{copied ? 'Copied' : 'Copy review'}</button>
+            </Section>
+        );
+    }
+
+    // ---- CSV export ----
+    const csvCell = (v) => { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    function tradesToCsv(trades, accounts) {
+        const names = Object.fromEntries((accounts || []).map((a) => [a.id, a.name]));
+        const head = ['Date', 'Account', 'Pair', 'Direction', 'Session', 'SMT', 'Setups', 'Mistakes', 'Rules followed', 'Psychology', 'Planned RR', 'Lot size', 'Result', 'P&L', 'Note'];
+        const rows = trades.map((t) => [tradeDateKey(t), names[t.accountId] || t.accountId || '', t.pair, t.direction, t.sessionRaw || t.session, t.smt, (t.setupTags || []).join('; '), (t.mistakes || []).join('; '), (t.rules || []).join('; '), (t.psych || []).join('; '), t.rr, t.lotSize == null ? '' : t.lotSize, t.result, t.pnl, t.rawNote || '']);
+        return [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n');
+    }
+    function downloadCsv(filename, text) {
+        const blob = new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    // ---- Execution quality from MT5 data (exit reason, order type, holding time, costs) ----
+    function Mt5Execution({ trades, isDark }) {
+        const m = trades.filter((t) => t.source === 'mt5');
+        if (!m.length) return null;
+        const exit = groupBy(m, (t) => t.exitReason || 'Not recorded').sort((a, b) => b.n - a.n);
+        const entry = groupBy(m, (t) => (t.entryType ? `${t.entryType} order` : 'Not recorded')).sort((a, b) => b.n - a.n);
+        const bucket = (t) => { const d = t.durationMin; if (d === null || d === undefined) return 'Not recorded'; return d < 15 ? 'Under 15 min' : d < 60 ? '15 to 60 min' : d < 240 ? '1 to 4 hours' : 'Over 4 hours'; };
+        const order = ['Under 15 min', '15 to 60 min', '1 to 4 hours', 'Over 4 hours', 'Not recorded'];
+        const hold = groupBy(m, bucket).sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label));
+        const comm = m.reduce((s, t) => s + (t.commission || 0), 0), swap = m.reduce((s, t) => s + (t.swap || 0), 0), gross = m.reduce((s, t) => s + (t.grossProfit || 0), 0);
+        return (
+            <Section isDark={isDark} title="Execution quality (from MT5)" sub={`${m.length} imported trade${m.length === 1 ? '' : 's'}: how trades ended, how you entered, how long you held and what it cost`}>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <Tile isDark={isDark} label="Gross profit before costs" value={moneyS(gross)} tone={gross >= 0 ? 'good' : 'bad'} />
+                    <Tile isDark={isDark} label="Commission paid" value={moneyS(comm)} tone="neutral" sub={gross > 0 ? `${Math.abs(pctOf(comm, gross)).toFixed(1)}% of gross profit` : null} />
+                    <Tile isDark={isDark} label="Swap" value={moneyS(swap)} tone="neutral" />
+                </div>
+                <div className="grid lg:grid-cols-3 gap-4">
+                    <div><p className="text-xs font-bold text-slate-400 mb-1">How trades ended</p><StatTable rows={exit} isDark={isDark} firstCol="Exit" /></div>
+                    <div><p className="text-xs font-bold text-slate-400 mb-1">Entry order</p><StatTable rows={entry} isDark={isDark} firstCol="Type" /></div>
+                    <div><p className="text-xs font-bold text-slate-400 mb-1">Holding time</p><StatTable rows={hold} isDark={isDark} firstCol="Held" /></div>
+                </div>
+            </Section>
+        );
+    }
+
+    // ---- Edge Lab page ----
+    function EdgeLab({ isDark, trades, risk, acc, accounts }) {
+        const [period, setPeriod] = useState('all');
+        const list = useMemo(() => periodFilter(trades, period), [trades, period]);
+        const oneR = useMemo(() => oneRof(list, risk), [list, risk]);
+        const wins = list.filter((t) => t.result === 'Win');
+        const net = list.reduce((s, t) => s + t.pnl, 0);
+
+        const setups = useMemo(() => groupBy(list, (t) => t.setupTags || []).sort((a, b) => b.net - a.net), [list]);
+        const untagged = list.filter((t) => !(t.setupTags || []).length).length;
+        const mistakes = useMemo(() => groupBy(list, (t) => t.mistakes || []).sort((a, b) => a.net - b.net), [list]);
+        const withMistake = list.filter((t) => (t.mistakes || []).length), clean = list.filter((t) => !(t.mistakes || []).length);
+        const monthly = useMemo(() => {
+            const byMonth = groupBy(list.filter((t) => (t.mistakes || []).length), (t) => tradeDateKey(t).slice(0, 7)).sort((a, b) => (a.label < b.label ? 1 : -1)).slice(0, 6);
+            return byMonth.map((m) => { const top = groupBy(m.trades, (t) => t.mistakes).sort((a, b) => b.n - a.n)[0]; return { month: m.label, top: top.label, count: top.n, total: m.n, cost: m.net }; });
+        }, [list]);
+        const smtTypes = useMemo(() => groupBy(list, smtKey).sort((a, b) => b.net - a.net), [list]);
+        const smtPairs = useMemo(() => groupBy(list, smtPairKey).sort((a, b) => b.net - a.net), [list]);
+
+        const rr = useMemo(() => {
+            const planned = list.map(plannedRR).filter((v) => v !== null);
+            const winR = oneR > 0 ? wins.map((t) => t.pnl / oneR) : [];
+            const buckets = oneR > 0 ? groupBy(list.filter((t) => plannedRR(t) !== null), (t) => `1:${plannedRR(t)}`).sort((a, b) => parseFloat(a.label.slice(2)) - parseFloat(b.label.slice(2))).map((g) => ({ ...g, planned: parseFloat(g.label.slice(2)), avgR: mean(g.trades.map((t) => t.pnl / oneR)), winAvgR: mean(g.trades.filter((t) => t.result === 'Win').map((t) => t.pnl / oneR)) })) : [];
+            const plannedWin = wins.map(plannedRR).filter((v) => v !== null);
+            return { plannedAvg: mean(planned), plannedWinAvg: mean(plannedWin), achievedWinAvg: mean(winR), buckets };
+        }, [list, wins, oneR]);
+
+        const exportCsv = () => downloadCsv(`mintpip-trades-${new Date().toLocaleDateString('en-CA')}.csv`, tradesToCsv(list, accounts));
+
+        return (
+            <div className="space-y-5">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                    <div>
+                        <h2 className={`text-2xl font-black ${strongCls(isDark)}`}>Edge Lab</h2>
+                        <p className="text-sm text-slate-500">{acc ? acc.name : 'Live accounts'}: find where your edge is and what is costing you.</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <select value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Period" className={inputCls(isDark)}>{PERIODS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+                        <button type="button" onClick={exportCsv} disabled={!list.length} className="px-4 py-2 rounded-xl bg-[#7C3AED] text-white text-xs font-bold hover:bg-[#6D28D9] disabled:opacity-50 transition">Export CSV</button>
+                    </div>
+                </div>
+
+                {list.length === 0 ? (
+                    <Section isDark={isDark} title="No trades in this period"><Empty>Pick a longer period, or add live trades first. Tag each new trade with a setup and any mistakes to unlock the setup and mistake reports.</Empty></Section>
+                ) : (
+                    <>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <Tile isDark={isDark} label="Trades" value={list.length} sub={`${wins.length} wins, ${list.length - wins.length} losses`} />
+                            <Tile isDark={isDark} label="Net P&L" value={moneyS(net)} tone={net >= 0 ? 'good' : 'bad'} sub={`Win rate ${pctOf(wins.length, list.length).toFixed(0)}%`} />
+                            <Tile isDark={isDark} label="Planned RR (winners)" value={rr.plannedWinAvg ? `1:${rr.plannedWinAvg.toFixed(1)}` : '-'} sub="Average target you set" />
+                            <Tile isDark={isDark} label="Achieved on winners" value={oneR > 0 && wins.length ? `${rr.achievedWinAvg.toFixed(2)}R` : '-'} tone={rr.plannedWinAvg && rr.achievedWinAvg >= rr.plannedWinAvg * 0.9 ? 'good' : 'neutral'} sub={rr.plannedWinAvg && oneR > 0 ? `${pctOf(rr.achievedWinAvg, rr.plannedWinAvg).toFixed(0)}% of the plan captured` : 'Needs a risk target or a logged loss'} />
+                        </div>
+
+                        <div className="grid lg:grid-cols-2 gap-4">
+                            <Section isDark={isDark} title="Setup performance" sub="Win rate by setup tag (a trade with two tags counts in both)">
+                                {setups.length === 0 ? <Empty>No setup tags yet. When you add a live trade, pick a setup type such as Silver Bullet or FVG tap.</Empty> : <StatTable rows={setups} isDark={isDark} firstCol="Setup" />}
+                                {untagged > 0 && setups.length > 0 && <p className="text-[11px] text-slate-500">{untagged} trade{untagged === 1 ? ' has' : 's have'} no setup tag.</p>}
+                            </Section>
+                            <Section isDark={isDark} title="Mistake tracker" sub="Most expensive mistakes first">
+                                {mistakes.length === 0 ? <Empty>No mistakes logged yet. After a bad trade, tick the reason (early entry, moved SL, revenge trade...) in the trade form.</Empty> : (
+                                    <>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <Tile isDark={isDark} label="Trades with a mistake" value={`${withMistake.length}`} sub={`${pctOf(withMistake.length, list.length).toFixed(0)}% of trades, ${moneyS(withMistake.reduce((s, t) => s + t.pnl, 0))}`} tone={withMistake.reduce((s, t) => s + t.pnl, 0) < 0 ? 'bad' : 'neutral'} />
+                                            <Tile isDark={isDark} label="Clean trades" value={`${clean.length}`} sub={`${clean.length ? pctOf(clean.filter((t) => t.result === 'Win').length, clean.length).toFixed(0) : 0}% win rate, ${moneyS(clean.reduce((s, t) => s + t.pnl, 0))}`} tone={clean.reduce((s, t) => s + t.pnl, 0) >= 0 ? 'good' : 'neutral'} />
+                                        </div>
+                                        <StatTable rows={mistakes} isDark={isDark} firstCol="Mistake" cost />
+                                    </>
+                                )}
+                            </Section>
+                        </div>
+
+                        {monthly.length > 0 && (
+                            <Section isDark={isDark} title="Biggest mistake each month" sub="Taken from the mistakes you logged">
+                                <div className="overflow-x-auto"><table className="w-full text-xs min-w-[380px]"><thead><tr className="text-slate-500 text-left"><th className="py-1.5 font-semibold">Month</th><th className="font-semibold">Most frequent mistake</th><th className="text-right font-semibold">Times</th><th className="text-right font-semibold">Trades with mistakes</th><th className="text-right font-semibold">P&L on them</th></tr></thead>
+                                    <tbody>{monthly.map((m) => (<tr key={m.month} className={`border-t ${isDark ? 'border-white/10' : 'border-slate-200'}`}><td className={`py-2 font-semibold ${strongCls(isDark)}`}>{m.month}</td><td className="text-slate-300">{m.top}</td><td className="text-right text-slate-400">{m.count}</td><td className="text-right text-slate-400">{m.total}</td><td className={`text-right font-bold ${m.cost >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{moneyS(m.cost)}</td></tr>))}</tbody></table></div>
+                            </Section>
+                        )}
+
+                        <div className="grid lg:grid-cols-2 gap-4">
+                            <Section isDark={isDark} title="SMT type" sub="Which divergence pattern pays you the most"><StatTable rows={smtTypes} isDark={isDark} firstCol="SMT type" /></Section>
+                            <Section isDark={isDark} title="SMT pair" sub="For example SMT with EURUSD versus SMT with XAGUSD"><StatTable rows={smtPairs} isDark={isDark} firstCol="SMT pair" /></Section>
+                        </div>
+
+                        <div className="grid lg:grid-cols-2 gap-4">
+                            <Section isDark={isDark} title="Heatmap: pair by session" sub="Where and when you make money"><Heat trades={list} rowsKey={(t) => t.pair} colsKey={(t) => t.session} isDark={isDark} rowLabel="Pair" /></Section>
+                            <Section isDark={isDark} title="Heatmap: SMT type by session" sub="Which divergence works in which session"><Heat trades={list} rowsKey={smtKey} colsKey={(t) => t.session} isDark={isDark} rowLabel="SMT" /></Section>
+                        </div>
+
+                        <Section isDark={isDark} title="Planned RR versus what you actually took" sub={oneR > 0 ? `1R = ${money(oneR)} (${risk && risk.startBal > 0 && risk.riskPct > 0 ? 'your risk target' : 'your average loss'})` : 'Set a risk target % on the account, or log a losing trade, so 1R can be measured'}>
+                            {rr.buckets.length === 0 ? <Empty>Not enough data to compare yet.</Empty> : (
+                                <div className="overflow-x-auto"><table className="w-full text-xs min-w-[420px]"><thead><tr className="text-slate-500 text-left"><th className="py-1.5 font-semibold">Planned</th><th className="text-right font-semibold">Trades</th><th className="text-right font-semibold">Win rate</th><th className="text-right font-semibold">Achieved on wins</th><th className="text-right font-semibold">Average per trade</th></tr></thead>
+                                    <tbody>{rr.buckets.map((b) => (<tr key={b.label} className={`border-t ${isDark ? 'border-white/10' : 'border-slate-200'}`}><td className={`py-2 font-semibold ${strongCls(isDark)}`}>{b.label}</td><td className="text-right text-slate-400">{b.n}</td><td className="text-right text-slate-300">{b.winRate.toFixed(0)}%</td><td className={`text-right font-bold ${b.wins ? (b.winAvgR >= b.planned * 0.9 ? 'text-emerald-400' : 'text-amber-400') : 'text-slate-500'}`}>{b.wins ? `${b.winAvgR.toFixed(2)}R` : '-'}</td><td className={`text-right font-bold ${b.avgR >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{`${b.avgR >= 0 ? '+' : ''}${b.avgR.toFixed(2)}R`}</td></tr>))}</tbody></table>
+                                    <p className="text-[11px] text-slate-500 mt-1">Amber means your winners closed well short of the target you planned.</p></div>
+                            )}
+                        </Section>
+
+                        <Mt5Execution trades={list} isDark={isDark} />
+
+                        <MonteCarlo trades={list} risk={risk} isDark={isDark} />
+                    </>
+                )}
+
+                <Review trades={trades} acc={acc} isDark={isDark} />
+                <Calculator acc={acc} risk={risk} isDark={isDark} />
+            </div>
+        );
+    }
+
+    // ---- Tag picker for the trade form (setups, mistakes) ----
+    function TagPicker({ label, hint, options, value, onChange, tone, isDark }) {
+        const [custom, setCustom] = useState('');
+        const on = tone === 'bad' ? 'bg-rose-500/20 border-rose-500/50 text-rose-300' : 'bg-violet-500/20 border-violet-500/50 text-violet-300';
+        const off = isDark ? 'bg-[#141B30] border-[#232C45] text-slate-400 hover:text-slate-200' : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-slate-900';
+        const all = [...options, ...value.filter((v) => !options.includes(v))];
+        const toggle = (o) => onChange(value.includes(o) ? value.filter((v) => v !== o) : [...value, o]);
+        const addCustom = () => { const v = custom.trim().slice(0, 30); if (v && !value.includes(v)) onChange([...value, v]); setCustom(''); };
+        return (
+            <div>
+                <label className="block font-bold mb-1 text-slate-400">{label}</label>
+                {hint && <p className="text-[11px] text-slate-500 mb-1.5">{hint}</p>}
+                <div className="flex flex-wrap gap-2">
+                    {all.map((o) => <button key={o} type="button" aria-pressed={value.includes(o)} onClick={() => toggle(o)} className={`px-3 py-1.5 rounded-lg border text-[11px] font-bold transition ${value.includes(o) ? on : off}`}>{o}</button>)}
+                    <input value={custom} onChange={(e) => setCustom(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustom(); } }} onBlur={addCustom} placeholder="+ add your own" aria-label={`Add custom ${label}`} className={`px-3 py-1.5 rounded-lg border text-[11px] font-semibold w-32 ${isDark ? 'bg-[#141B30] border-[#232C45] text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} />
+                </div>
+            </div>
+        );
+    }
+
+    // ---- Revenge-trade warning ----
+    function revengeInfo(trades, minutes = 30, nowMs = Date.now()) {
+        const stamped = trades.filter((t) => t.createdAt && !Number.isNaN(Date.parse(t.createdAt)));
+        if (!stamped.length) return null;
+        const last = stamped.reduce((a, t) => (Date.parse(t.createdAt) > Date.parse(a.createdAt) ? t : a));
+        const mins = (nowMs - Date.parse(last.createdAt)) / 60000;
+        if (last.result !== 'Loss' || mins < 0 || mins >= minutes) return null;
+        return { minutes: Math.max(1, Math.round(mins)), pair: last.pair, pnl: last.pnl, limit: minutes };
+    }
+    function RevengeBanner({ info }) {
+        if (!info) return null;
+        return (
+            <div role="alert" className="p-3 rounded-xl border border-rose-500/40 bg-rose-500/10 text-xs text-rose-300 space-y-0.5">
+                <p className="font-bold">Slow down: your last trade ({info.pair}, {moneyS(info.pnl)}) was a loss {info.minutes} minute{info.minutes === 1 ? '' : 's'} ago.</p>
+                <p>Trades taken within {info.limit} minutes of a loss are often revenge trades. Wait for a full-rule setup, and tick "Revenge trade" below if this one is.</p>
+            </div>
+        );
+    }
+
+    // ---- Daily checklist (must be completed before adding a live trade) ----
+    const todayKey = () => new Date().toLocaleDateString('en-CA');
+    const checklistDoneToday = () => !!lsGet(`mintpip_checklist_${todayKey()}`, null);
+    const checklistOff = () => lsGet('mintpip_checklist_off', false) === true;
+    const setChecklistOff = (v) => lsSet('mintpip_checklist_off', !!v);
+    function ChecklistGate({ open, onClose, onPass, isDark }) {
+        const [bias, setBias] = useState('');
+        const [news, setNews] = useState(false);
+        const [newsLevel, setNewsLevel] = useState('');
+        const [mood, setMood] = useState('');
+        const [plan, setPlan] = useState(false);
+        if (!open) return null;
+        const ready = bias && news && newsLevel && mood && plan;
+        const submit = () => { if (!ready) return; lsSet(`mintpip_checklist_${todayKey()}`, { bias, newsLevel, mood, at: new Date().toISOString() }); onPass(); };
+        const Pick = ({ value, set, opts }) => <div className="flex flex-wrap gap-2">{opts.map((o) => <button key={o} type="button" aria-pressed={value === o} onClick={() => set(o)} className={`px-3 py-1.5 rounded-lg border text-xs font-bold transition ${value === o ? 'bg-violet-500/20 border-violet-500/50 text-violet-300' : isDark ? 'bg-[#141B30] border-[#232C45] text-slate-400 hover:text-slate-200' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>{o}</button>)}</div>;
+        return (
+            <div onClick={onClose} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Pre-trade checklist" className={`p-6 rounded-2xl border max-w-md w-full space-y-4 shadow-2xl ${isDark ? 'bg-[#0E1426] border-white/15 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}>
+                    <div className="flex items-start justify-between gap-3">
+                        <div><h3 className="text-lg font-black text-[#A78BFA]">Before you trade today</h3><p className="text-xs text-slate-500 mt-0.5">Complete this once per day to unlock Add Trade.</p></div>
+                        <button type="button" onClick={onClose} aria-label="Close checklist" className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 text-sm font-bold">✕</button>
+                    </div>
+                    <div className="space-y-4 text-xs">
+                        <div><span className="block font-bold mb-1.5 text-slate-400">1. Daily bias</span><Pick value={bias} set={setBias} opts={['Bullish', 'Bearish', 'No clear bias']} /></div>
+                        <div>
+                            <span className="block font-bold mb-1.5 text-slate-400">2. News</span>
+                            <label className="flex items-center gap-2 font-semibold mb-2 cursor-pointer"><input type="checkbox" checked={news} onChange={(e) => setNews(e.target.checked)} className="w-4 h-4 rounded" /> I checked the economic calendar</label>
+                            <Pick value={newsLevel} set={setNewsLevel} opts={['No news', 'Low impact', 'High impact']} />
+                            {newsLevel === 'High impact' && <p className="text-amber-400 mt-1.5 font-semibold">High impact news today: consider smaller size or waiting until it has passed.</p>}
+                        </div>
+                        <div><span className="block font-bold mb-1.5 text-slate-400">3. How do you feel?</span><Pick value={mood} set={setMood} opts={['Calm', 'Focused', 'Tired', 'Stressed', 'Angry']} />
+                            {(mood === 'Angry' || mood === 'Stressed') && <p className="text-rose-400 mt-1.5 font-semibold">Trading while {mood.toLowerCase()} is how revenge trades start. You can continue, but think twice.</p>}</div>
+                        <label className="flex items-center gap-2 font-semibold cursor-pointer"><input type="checkbox" checked={plan} onChange={(e) => setPlan(e.target.checked)} className="w-4 h-4 rounded" /> 4. I know my risk per trade and today's loss limit</label>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 pt-1">
+                        <button type="button" onClick={() => { setChecklistOff(true); onPass(); }} className="text-[11px] text-slate-500 hover:text-slate-300 underline">Turn the checklist off</button>
+                        <button type="button" onClick={submit} disabled={!ready} className="px-5 py-2.5 rounded-xl bg-[#7C3AED] text-white text-sm font-bold hover:bg-[#6D28D9] disabled:opacity-40 disabled:cursor-not-allowed transition">Start trading</button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    return { EdgeLab, TagPicker, ChecklistGate, RevengeBanner, revengeInfo, tradesToCsv, downloadCsv, checklistDoneToday, checklistOff, setChecklistOff, SETUP_PRESETS, MISTAKE_PRESETS };
+})();
+
+// ---------------------------------------------------------------------------
+// MT5 report import (live accounts): reads the MetaTrader 5 "Trade History Report" (.xlsx or .csv),
+// matches each closed position with a trade you already logged (or creates a new one), and fills in everything
+// the report knows: lot size, entry/SL/TP, exit price and reason, commission, swap, net P&L, times, entry order type.
+// The Pending panel lists what MT5 cannot know (session, SMT, rules, psychology, setup...) so you can fill it in.
+// No extra library: the .xlsx file is unzipped with the browser's built-in DecompressionStream.
+// ---------------------------------------------------------------------------
+const { Mt5ImportModal, PendingPanel, missingDetails, Mt5Details, parseMt5Report, readXlsxRows, parseCsvRows, planImport, decodeText } = (() => {
+    // ---- reading the file ----
+    async function inflateRaw(bytes) {
+        const ds = new DecompressionStream('deflate-raw');
+        const stream = new Blob([bytes]).stream().pipeThrough(ds);
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    async function readZip(buf) {
+        const b = new Uint8Array(buf), dv = new DataView(buf);
+        let e = -1;
+        for (let i = b.length - 22; i >= Math.max(0, b.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { e = i; break; }
+        if (e < 0) throw new Error('This is not a valid .xlsx file.');
+        const total = dv.getUint16(e + 10, true);
+        let p = dv.getUint32(e + 16, true);
+        const files = {};
+        for (let i = 0; i < total; i++) {
+            if (dv.getUint32(p, true) !== 0x02014b50) break;
+            const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+            files[new TextDecoder().decode(b.subarray(p + 46, p + 46 + nlen))] = { method: dv.getUint16(p + 10, true), csize: dv.getUint32(p + 20, true), off: dv.getUint32(p + 42, true) };
+            p += 46 + nlen + xlen + clen;
+        }
+        const read = async (name) => {
+            const f = files[name];
+            if (!f) return null;
+            const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+            const data = b.subarray(start, start + f.csize);
+            if (f.method === 0) return data;
+            if (f.method === 8) return inflateRaw(data);
+            throw new Error('Unsupported compression in this .xlsx file.');
+        };
+        return { names: Object.keys(files), read };
+    }
+    // MT5 writes its XML as UTF-16, so the encoding has to be detected
+    function decodeText(bytes) {
+        if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+        if (bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+        if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+        if (bytes.length > 3 && bytes[1] === 0 && bytes[3] === 0) return new TextDecoder('utf-16le').decode(bytes);
+        return new TextDecoder('utf-8').decode(bytes);
+    }
+    const unesc = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (m, n) => String.fromCharCode(+n)).replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCharCode(parseInt(h, 16))).replace(/&amp;/g, '&');
+    const colIndex = (ref) => { let n = 0; for (const ch of /^[A-Z]+/.exec(ref)[0]) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+    const textOf = (xml) => { let s = ''; xml.replace(/<t[^>]*>([\s\S]*?)<\/t>/g, (m, x) => { s += x; return m; }); return unesc(s); };
+
+    async function readXlsxRows(buf) {
+        const zip = await readZip(buf);
+        const sheet = zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10))[0];
+        if (!sheet) throw new Error('No worksheet was found in this file.');
+        const shared = [];
+        const ss = await zip.read('xl/sharedStrings.xml');
+        if (ss) (decodeText(ss).match(/<si[\s>][\s\S]*?<\/si>/g) || []).forEach((si) => shared.push(textOf(si)));
+        const xml = decodeText(await zip.read(sheet));
+        const rows = [];
+        for (const rm of xml.matchAll(/<row\b[^>]*?(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+            const cells = [];
+            for (const cm of (rm[1] || '').matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+                const attrs = cm[1], body = cm[2] || '';
+                const ref = /\br="([A-Z]+\d+)"/.exec(attrs), t = /\bt="(\w+)"/.exec(attrs), v = /<v>([\s\S]*?)<\/v>/.exec(body);
+                let val = null;
+                if (t && t[1] === 's' && v) val = shared[parseInt(v[1], 10)];
+                else if (t && t[1] === 'inlineStr') val = textOf(body);
+                else if (t && t[1] === 'str') val = v ? unesc(v[1]) : '';
+                else if (t && t[1] === 'b') val = v ? v[1] === '1' : null;
+                else if (v) { const n = parseFloat(v[1]); val = Number.isFinite(n) ? n : unesc(v[1]); }
+                if (val !== null && val !== undefined) cells[ref ? colIndex(ref[1]) : cells.length] = val;
+            }
+            rows.push(cells);
+        }
+        return rows;
+    }
+    function parseCsvRows(text) {
+        const first = text.split(/\r?\n/).slice(0, 8).join('\n');
+        const delim = [';', '\t', ','].map((d) => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+        const rows = []; let row = [], cur = '', q = false;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (q) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+            else if (ch === '"') q = true;
+            else if (ch === delim) { row.push(cur); cur = ''; }
+            else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+            else cur += ch;
+        }
+        if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+        return rows.map((r) => r.map((c) => (c === '' ? undefined : c)));
+    }
+
+    // ---- understanding the report ----
+    const str = (v) => (v === null || v === undefined ? '' : String(v).trim());
+    const num = (v) => {
+        if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+        let s = str(v).replace(/[\s\u00a0]/g, '');
+        if (!s) return null;
+        if (s.includes(',') && s.includes('.')) s = s.replace(/,/g, '');
+        else if (s.includes(',')) s = s.replace(',', '.');
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : null;
+    };
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const mt5Time = (v) => { const m = /^(\d{4})[.\-/](\d{2})[.\-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(str(v)); return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}` : ''; };
+    const minutesBetween = (a, b) => (a && b ? Math.max(0, Math.round((Date.parse(`${b}Z`) - Date.parse(`${a}Z`)) / 60000)) : null);
+    const idxAll = (h, name) => h.reduce((acc, x, i) => (x.toLowerCase() === name.toLowerCase() ? [...acc, i] : acc), []);
+    const symKey = (s) => String(s || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6);
+
+    function parseMt5Report(rows) {
+        const meta = {};
+        let section = '', header = null;
+        const positions = [], orders = [], deals = [];
+        for (const r of rows) {
+            const c0 = str(r[0]);
+            const filled = r.filter((x) => x !== undefined && x !== null && str(x) !== '').length;
+            if (['Positions', 'Orders', 'Deals', 'Results'].includes(c0) && filled === 1) { section = c0.toLowerCase(); header = null; continue; }
+            if (!section) {
+                if (/:$/.test(c0)) { const val = r.slice(1).find((x) => x !== undefined && x !== null && str(x) !== ''); if (val !== undefined) meta[c0.replace(/:$/, '').toLowerCase()] = str(val); }
+                continue;
+            }
+            if (section === 'results') continue;
+            if (!header) { if (/^(time|open time)$/i.test(c0)) header = r.map(str); continue; }
+            if (!mt5Time(r[0])) continue; // summary rows under the table
+            const h = header;
+            if (section === 'positions') {
+                const times = idxAll(h, 'Time'), prices = idxAll(h, 'Price');
+                const ix = (n) => idxAll(h, n)[0];
+                const type = str(r[ix('Type')]);
+                positions.push({
+                    position: str(r[ix('Position')]), symbol: str(r[ix('Symbol')]), side: /sell/i.test(type) ? 'SELL' : 'BUY', volume: num(r[ix('Volume')]),
+                    entryPrice: num(r[prices[0]]), sl: num(r[ix('S / L')]) || null, tp: num(r[ix('T / P')]) || null,
+                    openTime: mt5Time(r[times[0]]), closeTime: mt5Time(r[times[1]]), exitPrice: num(r[prices[1]]),
+                    commission: num(r[ix('Commission')]) || 0, swap: num(r[ix('Swap')]) || 0, profit: num(r[ix('Profit')]) || 0
+                });
+            } else if (section === 'orders') {
+                const times = idxAll(h, 'Open Time').concat(idxAll(h, 'Time'));
+                const ix = (n) => idxAll(h, n)[0];
+                const price = r[ix('Price')];
+                orders.push({ order: str(r[ix('Order')]), symbol: str(r[ix('Symbol')]), type: str(r[ix('Type')]).toLowerCase(), price: num(price), sl: num(r[ix('S / L')]) || null, tp: num(r[ix('T / P')]) || null, state: str(r[ix('State')]).toLowerCase(), comment: str(r[ix('Comment')]), openTime: mt5Time(r[times[0]]), doneTime: mt5Time(r[times[1]]) });
+            } else if (section === 'deals') {
+                const ix = (n) => idxAll(h, n)[0];
+                deals.push({ time: mt5Time(r[0]), symbol: str(r[ix('Symbol')]), type: str(r[ix('Type')]).toLowerCase(), direction: str(r[ix('Direction')]).toLowerCase(), volume: num(r[ix('Volume')]), price: num(r[ix('Price')]), profit: num(r[ix('Profit')]) || 0, comment: str(r[ix('Comment')]) });
+            }
+        }
+        if (!positions.length) throw new Error('No closed positions were found. Export the report from MT5 as "Trade History Report" (English) with the Positions table included.');
+
+        const filledBy = new Map(orders.filter((o) => o.state === 'filled').map((o) => [o.order, o]));
+        positions.forEach((p) => {
+            const o = filledBy.get(p.position);
+            p.entryType = o ? (/stop/.test(o.type) && !/limit/.test(o.type) ? 'Stop' : /limit|stop/.test(o.type) ? 'Limit' : 'Market') : '';
+            p.plannedSl = (o && o.sl) || p.sl; p.plannedTp = (o && o.tp) || p.tp;
+            const out = deals.find((d) => d.direction === 'out' && d.symbol === p.symbol && d.time === p.closeTime && (d.price === null || p.exitPrice === null || Math.abs(d.price - p.exitPrice) < 1e-9)) || deals.find((d) => d.direction === 'out' && d.symbol === p.symbol && d.time === p.closeTime);
+            p.exitReason = out ? (/\[sl/i.test(out.comment) ? 'SL' : /\[tp/i.test(out.comment) ? 'TP' : /so:|stop ?out/i.test(out.comment) ? 'Stop out' : 'Manual') : '';
+            p.net = r2(p.profit + p.commission + p.swap);
+            p.durationMin = minutesBetween(p.openTime, p.closeTime);
+            p.openDate = p.openTime.slice(0, 10);
+        });
+        positions.sort((a, b) => (a.openTime < b.openTime ? -1 : 1));
+        const acc = meta.account || '';
+        return {
+            meta: { name: meta.name || '', account: acc, login: (/^\s*(\d+)/.exec(acc) || [])[1] || '', currency: (/\(\s*([A-Z]{3})/.exec(acc) || [])[1] || '', company: meta.company || '', reportDate: meta.date || '' },
+            positions,
+            orderStats: { cancelled: orders.filter((o) => o.state === 'canceled' || o.state === 'cancelled').length, rejected: orders.filter((o) => o.state === 'rejected').length },
+            balanceOps: deals.filter((d) => d.type === 'balance').map((d) => ({ time: d.time, amount: d.profit, comment: d.comment }))
+        };
+    }
+
+    // ---- matching with trades that are already logged ----
+    const docPair = (d) => String(d.pairDirection || '').split(' - ')[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const docSide = (d) => (/SELL|SHORT/i.test(d.pairDirection || '') ? 'SELL' : /BUY|LONG/i.test(d.pairDirection || '') ? 'BUY' : '');
+    const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 864e5);
+    const docNet = (d) => (Number(d.profitAmount) > 0 ? Number(d.profitAmount) : Number(d.lossAmount) > 0 ? -Number(d.lossAmount) : 0);
+    const near = (a, b, tol = 1e-6) => a !== null && a !== undefined && b !== null && b !== undefined && Math.abs(Number(a) - Number(b)) <= tol;
+    const prettySym = (s) => { const k = symKey(s); return k.length === 6 ? `${k.slice(0, 3)}/${k.slice(3)}` : String(s || ''); };
+
+    function tradeFields(p) {
+        const pip = getPipSize(p.symbol);
+        const f = {
+            mt5Position: p.position, entryPrice: p.entryPrice, lotSizeRisk: p.volume, outcome: p.net > 0 ? 'Win' : 'Loss',
+            profitAmount: p.net > 0 ? p.net : null, lossAmount: p.net > 0 ? null : Math.abs(p.net),
+            openTime: p.openTime, closeTime: p.closeTime, exitPrice: p.exitPrice, commission: p.commission, swap: p.swap, grossProfit: p.profit,
+            exitReason: p.exitReason, entryType: p.entryType, durationMin: p.durationMin
+        };
+        if (p.plannedSl) f.slPrice = p.plannedSl;
+        if (p.plannedTp) f.tpPrice = p.plannedTp;
+        if (p.plannedSl && p.plannedTp && p.entryPrice) {
+            const sl = Math.abs(p.entryPrice - p.plannedSl) / pip, tp = Math.abs(p.plannedTp - p.entryPrice) / pip;
+            if (sl > 0) f.planeTarget = `1:${Math.round((tp / sl) * 100) / 100} (${Math.round(sl * 10) / 10}p : ${Math.round(tp * 10) / 10}p)`;
+        }
+        return f;
+    }
+    function diffAgainst(doc, p, f) {
+        const ch = [];
+        const add = (label, from, to) => ch.push({ label, from, to });
+        if (!near(doc.lotSizeRisk, f.lotSizeRisk)) add('Lot size', doc.lotSizeRisk ?? '-', f.lotSizeRisk);
+        if (!near(doc.entryPrice, f.entryPrice, 1e-7)) add('Entry', doc.entryPrice ?? '-', f.entryPrice);
+        if (f.slPrice && !near(doc.slPrice, f.slPrice, 1e-7)) add('SL', doc.slPrice ?? '-', f.slPrice);
+        if (f.tpPrice && !near(doc.tpPrice, f.tpPrice, 1e-7)) add('TP', doc.tpPrice ?? '-', f.tpPrice);
+        if (!near(docNet(doc), p.net, 0.005)) add('Net P&L', docNet(doc).toFixed(2), p.net.toFixed(2));
+        if (doc.mt5Position !== p.position || !doc.openTime || !doc.exitReason) add('MT5 execution data', 'none', 'times, exit, costs');
+        return ch;
+    }
+    function planImport(report, docs, accountId) {
+        const eligible = (docs || []).filter((d) => (!d.accountId || d.accountId === accountId));
+        const cands = [];
+        report.positions.forEach((p, pi) => {
+            eligible.forEach((d, di) => {
+                if (d.mt5Position && d.mt5Position !== p.position) return;
+                if (d.mt5Position === p.position) { cands.push({ pi, di, score: 1000 }); return; }
+                if (docPair(d) !== symKey(p.symbol)) return;
+                const side = docSide(d);
+                if (side && side !== p.side) return;
+                const dd = Math.abs(dayDiff(String(d.date).slice(0, 10), p.openDate));
+                if (dd > 1) return;
+                let score = dd === 0 ? 50 : 20;
+                if (d.entryPrice !== null && d.entryPrice !== undefined && p.entryPrice) { const pips = Math.abs(d.entryPrice - p.entryPrice) / getPipSize(p.symbol); score += pips <= 3 ? 40 : pips <= 10 ? 20 : -30; }
+                const dn = docNet(d);
+                if (dn !== 0 || d.outcome) score += (dn > 0 || /win/i.test(d.outcome || '')) === (p.net > 0) ? 25 : -25;
+                if (d.lotSizeRisk && near(d.lotSizeRisk, p.volume)) score += 15;
+                if (score >= 60) cands.push({ pi, di, score });
+            });
+        });
+        cands.sort((a, b) => b.score - a.score);
+        const usedP = new Set(), usedD = new Set(), matchOf = {};
+        cands.forEach((c) => { if (usedP.has(c.pi) || usedD.has(c.di)) return; usedP.add(c.pi); usedD.add(c.di); matchOf[c.pi] = c; });
+        return report.positions.map((p, pi) => {
+            const m = matchOf[pi], fields = tradeFields(p);
+            if (!m) return { key: p.position, pos: p, fields, doc: null, action: 'create', changes: [], note: 'New trade' };
+            const doc = eligible[m.di], changes = diffAgainst(doc, p, fields);
+            const already = doc.mt5Position === p.position && !changes.length;
+            return { key: p.position, pos: p, fields, doc, action: already ? 'skip' : 'update', changes, note: already ? 'Already imported, nothing new' : m.score >= 110 ? 'Matched your logged trade' : 'Probably your logged trade, please check' };
+        });
+    }
+
+    // ---- what MT5 cannot know ----
+    function missingDetails(t) {
+        const out = [];
+        if (!t.sessionRaw) out.push('Session');
+        if (!t.fvgTap) out.push('15m FVG tap');
+        const s = parseSmt(t.smt);
+        if (!t.smt || (!s.none && (!s.type || !s.pair))) out.push('SMT');
+        if (!t.rules || !t.rules.length) out.push('Execution rules');
+        if (!t.psych || !t.psych.length) out.push('Psychology');
+        if (!t.setupTags || !t.setupTags.length) out.push('Setup type');
+        return out;
+    }
+
+    // ---- UI ----
+    const fmtT = (iso) => (iso ? iso.replace('T', ' ').slice(0, 16) : '-');
+    const sgn = (v) => `${v < 0 ? '-' : '+'}$${Math.abs(v).toFixed(2)}`;
+    const panel = (d) => (d ? 'bg-[#0E1426] border-white/15 text-slate-200' : 'bg-white border-slate-200 text-slate-800');
+    const field = (d) => `px-3 py-2 rounded-xl border text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-violet-500 ${d ? 'bg-[#141B30] border-[#232C45] text-slate-200' : 'bg-slate-50 border-slate-300 text-slate-800'}`;
+
+    function Mt5ImportModal({ open, onClose, isDark, accounts, activeAcc, docs, apiBase, onDone }) {
+        const [accountId, setAccountId] = useState('');
+        const [report, setReport] = useState(null);
+        const [fileName, setFileName] = useState('');
+        const [rows, setRows] = useState([]);
+        const [error, setError] = useState('');
+        const [busy, setBusy] = useState(false);
+        const [result, setResult] = useState(null);
+        const inputRef = useRef(null);
+
+        useEffect(() => { if (open) { setAccountId((activeAcc && activeAcc.id) || (accounts[0] && accounts[0].id) || ''); setReport(null); setRows([]); setError(''); setResult(null); setFileName(''); } }, [open]);
+        useEffect(() => { // the account that already carries this MT5 login is chosen automatically
+            if (!report || !report.meta.login) return;
+            const hit = accounts.find((a) => a.mt5Login && String(a.mt5Login) === report.meta.login);
+            if (hit) setAccountId(hit.id);
+        }, [report]);
+        useEffect(() => { if (report) setRows(planImport(report, docs, accountId)); }, [report, accountId, docs]);
+        if (!open) return null;
+
+        const account = accounts.find((a) => a.id === accountId);
+        const onFile = async (file) => {
+            if (!file) return;
+            setError(''); setResult(null); setBusy(true); setFileName(file.name);
+            try {
+                const buf = await file.arrayBuffer();
+                const isXlsx = /\.xlsx$/i.test(file.name) || (new Uint8Array(buf)[0] === 0x50 && new Uint8Array(buf)[1] === 0x4B);
+                let data;
+                if (isXlsx) {
+                    if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open .xlsx files here. Use a recent Chrome, Edge or Brave, or export the report as CSV.');
+                    data = await readXlsxRows(buf);
+                } else data = parseCsvRows(decodeText(new Uint8Array(buf)));
+                setReport(parseMt5Report(data));
+            } catch (e) { setReport(null); setRows([]); setError(e.message || 'Could not read this file.'); }
+            finally { setBusy(false); }
+        };
+        const setAction = (key, action) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, action } : r)));
+        const todo = rows.filter((r) => r.action !== 'skip');
+        const counts = { update: rows.filter((r) => r.action === 'update').length, create: rows.filter((r) => r.action === 'create').length, skip: rows.filter((r) => r.action === 'skip').length };
+
+        const submit = async () => {
+            if (!account || !todo.length || busy) return;
+            setBusy(true); setError('');
+            try {
+                const items = todo.map((r) => ({
+                    action: r.action, tradeId: r.doc ? r.doc._id : null,
+                    trade: r.action === 'create' ? { ...r.fields, date: r.pos.openDate, pairDirection: `${prettySym(r.pos.symbol)} - ${r.pos.side}` } : r.fields
+                }));
+                const res = await fetch(`${apiBase}/api/trades/import-mt5`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountId: account.id, mt5Login: report.meta.login, items }) });
+                const d = await res.json().catch(() => null);
+                if (!res.ok || !d || !d.success) throw new Error((d && d.error) || `Server returned ${res.status}`);
+                setResult(d);
+                if (onDone) onDone(d);
+            } catch (e) { setError(`Import failed: ${e.message}`); }
+            finally { setBusy(false); }
+        };
+
+        const sub = 'text-slate-500';
+        return (
+            <div onClick={onClose} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-3 sm:p-4">
+                <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Import MT5 report" className={`p-5 sm:p-7 rounded-2xl border max-w-5xl w-full relative shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto ${panel(isDark)}`}>
+                    <div className="flex items-start justify-between gap-3 border-b pb-4 border-slate-700/40">
+                        <div><h3 className="text-lg font-black text-[#A78BFA]">Import MT5 report</h3><p className={`text-xs mt-0.5 ${sub}`}>Fills lot size, entry, SL, TP, exit, costs and real P&L from MetaTrader 5. Nothing is saved until you press Import.</p></div>
+                        <button type="button" onClick={onClose} aria-label="Close" className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 text-sm font-bold">✕</button>
+                    </div>
+
+                    {accounts.length === 0 ? <p className="text-sm text-amber-300">Create a funded account in the Accounts tab first.</p> : (
+                        <div className="flex flex-wrap items-end gap-3">
+                            <label className="text-[11px] text-slate-400 space-y-1 block"><span className="font-semibold block">Account this report belongs to</span>
+                                <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className={field(isDark)}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}{a.mt5Login ? ` (MT5 ${a.mt5Login})` : ''}</option>)}</select></label>
+                            <button type="button" onClick={() => inputRef.current && inputRef.current.click()} disabled={busy} className="px-5 py-2.5 rounded-xl bg-[#7C3AED] text-white text-sm font-bold hover:bg-[#6D28D9] disabled:opacity-60 transition">{report ? 'Choose another file' : 'Choose MT5 report (.xlsx / .csv)'}</button>
+                            <input ref={inputRef} type="file" accept=".xlsx,.csv,.txt" className="hidden" onChange={(e) => { onFile(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+                            {fileName && <span className={`text-xs pb-3 ${sub}`}>{fileName}</span>}
+                        </div>
+                    )}
+
+                    <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files && e.dataTransfer.files[0]); }} className={report ? 'hidden' : `rounded-2xl border-2 border-dashed p-8 text-center text-sm ${isDark ? 'border-[#232C45] text-slate-400' : 'border-slate-300 text-slate-500'}`}>
+                        {busy ? 'Reading the report...' : 'Drop the MT5 file here. In MT5: View > Toolbox > History, right-click > Report > "Trade History Report" (Open XLSX).'}
+                    </div>
+
+                    {error && <div role="alert" className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-sm text-rose-300">{error}</div>}
+
+                    {report && !result && (
+                        <>
+                            <div className={`p-4 rounded-xl border text-xs grid sm:grid-cols-2 gap-x-6 gap-y-1 ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+                                <div><span className={sub}>Report:</span> <b>{report.meta.name || '-'}</b></div>
+                                <div><span className={sub}>MT5 account:</span> <b>{report.meta.login || '-'}</b> {report.meta.currency && `(${report.meta.currency})`}{account && !account.mt5Login && <span className="text-violet-400"> will be linked to {account.name}</span>}</div>
+                                <div><span className={sub}>Company:</span> {report.meta.company || '-'}</div>
+                                <div><span className={sub}>Closed positions:</span> <b>{report.positions.length}</b> ({fmtT(report.positions[0].openTime)} to {fmtT(report.positions[report.positions.length - 1].closeTime)})</div>
+                                {(report.orderStats.cancelled > 0 || report.orderStats.rejected > 0) && <div className="sm:col-span-2"><span className={sub}>Orders that never filled:</span> {report.orderStats.cancelled} cancelled, {report.orderStats.rejected} rejected</div>}
+                            </div>
+                            <div className="flex flex-wrap gap-3 text-xs font-bold">
+                                <span className="px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">{counts.update} to update</span>
+                                <span className="px-3 py-1.5 rounded-lg bg-violet-500/10 text-violet-300 border border-violet-500/20">{counts.create} new</span>
+                                <span className="px-3 py-1.5 rounded-lg bg-slate-500/10 text-slate-400 border border-slate-500/20">{counts.skip} skipped</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-xs min-w-[760px]">
+                                    <thead><tr className={`text-left ${sub}`}><th className="py-1.5 pr-2 font-semibold">Opened (broker time)</th><th className="font-semibold">Trade</th><th className="font-semibold">Entry / Exit</th><th className="font-semibold text-right">Net P&L</th><th className="font-semibold pl-3">Exit</th><th className="font-semibold pl-3">What will happen</th></tr></thead>
+                                    <tbody>
+                                        {rows.map((r) => (
+                                            <tr key={r.key} className={`border-t align-top ${isDark ? 'border-white/10' : 'border-slate-200'} ${r.action === 'skip' ? 'opacity-60' : ''}`}>
+                                                <td className="py-2 pr-2 whitespace-nowrap">{fmtT(r.pos.openTime)}<div className={`text-[10px] ${sub}`}>{r.pos.durationMin !== null ? `held ${r.pos.durationMin} min` : ''}</div></td>
+                                                <td className="whitespace-nowrap"><b className={r.pos.side === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}>{r.pos.side}</b> {r.pos.symbol} <span className={sub}>{r.pos.volume} lot</span></td>
+                                                <td className="whitespace-nowrap">{r.pos.entryPrice} <span className={sub}>to</span> {r.pos.exitPrice}<div className={`text-[10px] ${sub}`}>SL {r.fields.slPrice || '-'} / TP {r.fields.tpPrice || '-'}</div></td>
+                                                <td className={`text-right font-bold whitespace-nowrap ${r.pos.net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{sgn(r.pos.net)}<div className={`text-[10px] font-normal ${sub}`}>fees {sgn(r.pos.commission + r.pos.swap)}</div></td>
+                                                <td className="pl-3 whitespace-nowrap">{r.pos.exitReason || '-'}{r.pos.entryType && <div className={`text-[10px] ${sub}`}>{r.pos.entryType} entry</div>}</td>
+                                                <td className="pl-3">
+                                                    <select value={r.action} onChange={(e) => setAction(r.key, e.target.value)} aria-label="Action" className={`${field(isDark)} !py-1 !text-xs`}>
+                                                        {r.doc && <option value="update">Update logged trade ({String(r.doc.date).slice(0, 10)})</option>}
+                                                        <option value="create">{r.doc ? 'Add as a new trade instead' : 'Add as a new trade'}</option>
+                                                        <option value="skip">Skip</option>
+                                                    </select>
+                                                    <div className={`text-[10px] mt-1 ${r.doc && r.note.startsWith('Probably') ? 'text-amber-400' : sub}`}>{r.note}</div>
+                                                    {r.action === 'update' && r.changes.length > 0 && <div className="text-[10px] text-slate-400 mt-0.5">{r.changes.map((c) => `${c.label}: ${c.from} to ${c.to}`).join(' | ')}</div>}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p className={`text-[11px] ${sub}`}>MT5 is treated as the truth for numbers. Session, SMT, rules, psychology and setup are not in the report, so after importing they appear in the Pending details bell for you to fill in. Times are in your broker's server time.</p>
+                            <div className="flex justify-end gap-3 border-t pt-4 border-slate-700/40">
+                                <button type="button" onClick={onClose} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white text-sm font-bold hover:bg-slate-700 transition">Cancel</button>
+                                <button type="button" onClick={submit} disabled={busy || !todo.length} className="px-6 py-2.5 rounded-xl bg-[#7C3AED] text-white text-sm font-bold hover:bg-[#6D28D9] disabled:opacity-50 transition">{busy ? 'Importing...' : `Import ${todo.length} trade${todo.length === 1 ? '' : 's'}`}</button>
+                            </div>
+                        </>
+                    )}
+
+                    {result && (
+                        <div className="space-y-3">
+                            <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm text-emerald-300 font-semibold">Done: {result.updated} updated, {result.created} added{result.skipped ? `, ${result.skipped} skipped` : ''}.</div>
+                            {result.errors && result.errors.length > 0 && <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300 space-y-0.5">{result.errors.map((e, i) => <p key={i}>{e}</p>)}</div>}
+                            <p className={`text-xs ${sub}`}>Open the bell icon at the top to see which trades still need session, SMT, rules and the other details MT5 cannot know.</p>
+                            <div className="flex justify-end"><button type="button" onClick={onClose} className="px-6 py-2.5 rounded-xl bg-[#7C3AED] text-white text-sm font-bold hover:bg-[#6D28D9] transition">Close</button></div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    function PendingPanel({ open, onClose, trades, isDark, onEdit }) {
+        const [all, setAll] = useState(false);
+        if (!open) return null;
+        const items = trades.map((t) => ({ t, miss: missingDetails(t) })).filter((x) => x.miss.length && (all || x.t.source === 'mt5'));
+        const byDate = {};
+        items.forEach((x) => { const d = tradeDateKey(x.t) || 'No date'; (byDate[d] = byDate[d] || []).push(x); });
+        const dates = Object.keys(byDate).sort().reverse();
+        return (
+            <div onClick={onClose} className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-start justify-center p-3 sm:p-6 overflow-y-auto">
+                <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Pending trade details" className={`p-5 sm:p-6 rounded-2xl border max-w-2xl w-full shadow-2xl space-y-4 mt-8 ${panel(isDark)}`}>
+                    <div className="flex items-start justify-between gap-3">
+                        <div><h3 className="text-lg font-black text-[#A78BFA]">Details still needed</h3><p className="text-xs text-slate-500 mt-0.5">MetaTrader cannot know these. Open a trade to fill them in.</p></div>
+                        <button type="button" onClick={onClose} aria-label="Close" className="w-9 h-9 rounded-xl bg-slate-800/60 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-white/10 text-sm font-bold">✕</button>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs font-semibold text-slate-400 cursor-pointer"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} className="w-4 h-4 rounded" /> Also show older trades that were not imported from MT5</label>
+                    {items.length === 0 ? <p className="text-sm text-emerald-400 font-semibold py-4">All caught up. Every imported trade has its details.</p> : (
+                        <div className="space-y-4">
+                            <p className="text-xs text-slate-500">{items.length} trade{items.length === 1 ? '' : 's'} on {dates.length} day{dates.length === 1 ? '' : 's'}</p>
+                            {dates.map((d) => (
+                                <div key={d} className="space-y-2">
+                                    <h4 className={`text-sm font-black ${isDark ? 'text-white' : 'text-slate-900'}`}>{d}</h4>
+                                    {byDate[d].map(({ t, miss }) => (
+                                        <div key={t.pageId} className={`p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3 ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+                                            <div className="min-w-0">
+                                                <div className="text-xs font-bold"><span className={t.direction === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}>{t.direction === 'LONG' ? 'BUY' : 'SELL'}</span> {t.pair} <span className={t.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{sgn(t.pnl)}</span>{t.openTime && <span className="text-slate-500 font-normal"> at {t.openTime.slice(11, 16)}</span>}</div>
+                                                <div className="flex flex-wrap gap-1.5 mt-1.5">{miss.map((m) => <span key={m} className="px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-bold">{m}</span>)}</div>
+                                            </div>
+                                            <button type="button" onClick={() => onEdit(t)} className="px-4 py-2 rounded-xl bg-[#7C3AED] text-white text-xs font-bold hover:bg-[#6D28D9] transition">Fill in</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    function Mt5Details({ t, isDark }) {
+        if (!t || t.source !== 'mt5') return null;
+        const Row = ({ k, v }) => <div className="text-xs text-slate-400">{k}: <b className={isDark ? 'text-slate-200' : 'text-slate-800'}>{v}</b></div>;
+        return (
+            <div className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+                <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-400">MT5 execution data</h4>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
+                    <Row k="Opened" v={fmtT(t.openTime)} /><Row k="Closed" v={fmtT(t.closeTime)} />
+                    <Row k="Held" v={t.durationMin !== null && t.durationMin !== undefined ? `${t.durationMin} min` : '-'} /><Row k="Exit" v={`${t.exitReason || '-'}${t.exitPrice ? ` at ${t.exitPrice}` : ''}`} />
+                    <Row k="Entry order" v={t.entryType || '-'} /><Row k="Gross profit" v={t.grossProfit !== null && t.grossProfit !== undefined ? sgn(t.grossProfit) : '-'} />
+                    <Row k="Commission" v={t.commission !== null && t.commission !== undefined ? sgn(t.commission) : '-'} /><Row k="Swap" v={t.swap !== null && t.swap !== undefined ? sgn(t.swap) : '-'} />
+                </div>
+            </div>
+        );
+    }
+
+    return { Mt5ImportModal, PendingPanel, missingDetails, Mt5Details, parseMt5Report, readXlsxRows, parseCsvRows, planImport, decodeText };
+})();
+
 function BreakdownCard({ title, subtitle, rows, isDark }) {
     return (
         <div className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30]/70 border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
@@ -268,6 +1368,62 @@ function DrawdownChart({ series, isDark }) {
 // ---------------------------------------------------------------------------
 // Backend base URL: leave empty to use the Vite proxy, or set VITE_API_URL for a deployed API
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) || '';
+
+// ---------------------------------------------------------------------------
+// Login: the token is kept in this browser and sent with every API call
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = 'mintpip_token';
+const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; } };
+const setToken = (t) => { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (_) { /* storage blocked */ } };
+if (typeof window !== 'undefined' && !window.__mintpipFetchPatched) {
+    window.__mintpipFetchPatched = true;
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const isApi = url.startsWith(`${API_BASE}/api/`) && !url.includes('/api/auth/');
+        if (!isApi) return nativeFetch(input, init);
+        const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+        const token = getToken();
+        if (token) headers.set('Authorization', `Bearer ${token}`);
+        const res = await nativeFetch(input, { ...init, headers });
+        if (res.status === 401) { setToken(''); window.dispatchEvent(new Event('mintpip-auth-expired')); }
+        return res;
+    };
+}
+
+function LoginScreen({ onLoggedIn, locked }) {
+    const [pw, setPw] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+    const submit = async (e) => {
+        e.preventDefault();
+        if (busy || !pw) return;
+        setBusy(true); setErr('');
+        try {
+            const r = await fetch(`${API_BASE}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d.token) { setToken(d.token); onLoggedIn(); }
+            else setErr(d.error || 'Login failed.');
+        } catch (_) { setErr('Cannot reach the server. Check that it is running.'); }
+        setBusy(false);
+    };
+    return (
+        <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0B1020', padding: 16, fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif" }}>
+            <form onSubmit={submit} style={{ width: '100%', maxWidth: 360, background: '#141B30', border: '1px solid #232C45', borderRadius: 20, padding: 28, color: '#F1F5F9', boxShadow: '0 20px 60px rgba(0,0,0,.45)' }}>
+                <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>MintPip</div>
+                <div style={{ fontSize: 12, color: '#7C88A6', marginBottom: 20 }}>Journal & Analytics Hub · private</div>
+                {locked ? (
+                    <div style={{ fontSize: 13, color: '#FBBF24', lineHeight: 1.5 }}>The server is locked. Add <b>APP_PASSWORD</b> to the server environment variables, then redeploy.</div>
+                ) : (<>
+                    <input type="password" autoFocus autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password"
+                        style={{ width: '100%', padding: '12px 14px', borderRadius: 12, border: '1px solid #232C45', background: '#0B1020', color: '#fff', fontSize: 14, outline: 'none', boxSizing: 'border-box' }} />
+                    {err && <div style={{ color: '#FB7185', fontSize: 12, marginTop: 10 }}>{err}</div>}
+                    <button type="submit" disabled={busy || !pw} style={{ width: '100%', marginTop: 14, padding: '12px 14px', borderRadius: 12, border: 0, background: '#6366F1', color: '#fff', fontWeight: 800, fontSize: 14, cursor: busy || !pw ? 'not-allowed' : 'pointer', opacity: busy || !pw ? 0.6 : 1 }}>{busy ? 'Checking…' : 'Log in'}</button>
+                </>)}
+            </form>
+        </div>
+    );
+}
 
 // ---------------------------------------------------------------------------
 // AI performance report modal (self-contained; wrapped so its helper names cannot clash with this file)
@@ -801,7 +1957,14 @@ const ACC_FIELDS = [
     ['targetPct', 'Profit target (%, 0 = none)', 'number'], ['minDays', 'Min trading days', 'number'],
     ['consistencyPct', 'Consistency: best day ≤ % of profit (0 = off)', 'number'], ['profitSplit', 'Profit split (%)', 'number'], ['fee', 'Challenge fee ($)', 'number']
 ];
+const ACC_FIELDS_LIVE = [
+    ['name', 'Account name', 'text'], ['firm', 'Broker', 'text'], ['startBalance', 'Starting balance / deposit ($)', 'number'], ['startDate', 'Start date', 'date'],
+    ['endDate', 'End date (optional)', 'date'], ['dailyLossPct', 'My daily loss limit (%, 0 = off)', 'number'], ['maxDDPct', 'My max drawdown (%, 0 = off)', 'number']
+];
 const ACC_EMPTY = { name: '', firm: '', type: 'Challenge', phase: 'Phase 1', status: 'Active', startBalance: '', startDate: todayKey(), endDate: '', dailyLossPct: 5, maxDDPct: 10, ddType: 'static', targetPct: 10, minDays: 0, consistencyPct: 0, profitSplit: 80, fee: 0, payouts: [] };
+// A LIVE account = your own money at a broker (no challenge, no firm rules). Limits below are your own optional rules (0 = off)
+const ACC_LIVE = { type: 'Live', phase: 'Live', status: 'Active', dailyLossPct: 0, maxDDPct: 0, ddType: 'static', targetPct: 0, minDays: 0, consistencyPct: 0, profitSplit: 100, fee: 0 };
+const isLiveAcc = (a) => !!a && a.type === 'Live';
 const accInput = 'w-full px-3 py-2 rounded-xl border text-sm bg-[#141B30] border-[#232C45] text-slate-200';
 
 function Meter({ title, main, sub, ratio, color }) {
@@ -851,8 +2014,9 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
     };
 
     const sumPayouts = (a) => (a.payouts || []).reduce((s, p) => s + p.amount, 0);
-    const totalFees = accounts.reduce((s, a) => s + (Number(a.fee) || 0), 0);
-    const totalPayouts = accounts.reduce((s, a) => s + sumPayouts(a), 0);
+    const propAccounts = accounts.filter(a => !isLiveAcc(a)); // own-money live accounts are kept out of the prop-firm fee / payout totals
+    const totalFees = propAccounts.reduce((s, a) => s + (Number(a.fee) || 0), 0);
+    const totalPayouts = propAccounts.reduce((s, a) => s + sumPayouts(a), 0);
     const h = m ? HEALTH[m.health] : null;
     const netCls = (v) => v >= 0 ? 'text-emerald-400' : 'text-rose-400';
     const card = 'p-5 rounded-2xl border bg-[#0E1426] border-[#232C45]';
@@ -864,15 +2028,38 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
 
             {form && (
                 <section>
-                    <SectionHead title={form.id ? 'Edit account' : 'New funded account'} sub="Enter the rules from your firm so MintPip can track the limits for you." />
+                    <SectionHead title={form.id ? (isLiveAcc(form) ? 'Edit live account' : 'Edit account') : (isLiveAcc(form) ? 'New live account' : 'New funded account')}
+                        sub={isLiveAcc(form) ? 'Your own money at a broker. No firm rules; the limits below are optional rules you set for yourself.' : 'Enter the rules from your firm so MintPip can track the limits for you.'} />
                     <div className={`${card} space-y-4`}>
+                        <div>
+                            <div className="text-[11px] font-bold mb-2 text-slate-400">Account category</div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-xl">
+                                {[['funded', 'Funded / Prop account', 'Challenge, instant or funded account from a prop firm'], ['live', 'Live account', 'Your own money at a broker']].map(([key, title, hint]) => {
+                                    const on = (key === 'live') === isLiveAcc(form);
+                                    return (
+                                        <button type="button" key={key} onClick={() => {
+                                            if (on) return;
+                                            setForm(key === 'live'
+                                                ? { ...form, ...ACC_LIVE }
+                                                : { ...form, type: 'Challenge', phase: 'Phase 1', status: 'Active', dailyLossPct: 5, maxDDPct: 10, targetPct: 10, profitSplit: 80 });
+                                        }} className={`text-left p-3 rounded-xl border transition ${on ? 'border-indigo-500 bg-indigo-500/10' : 'border-[#232C45] bg-[#141B30] hover:border-indigo-500/40'}`}>
+                                            <div className={`text-xs font-extrabold ${on ? 'text-indigo-300' : 'text-slate-200'}`}>{title}</div>
+                                            <div className="text-[11px] text-slate-400 mt-0.5">{hint}</div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-                            {ACC_FIELDS.map(([k, label, type]) => (
+                            {(isLiveAcc(form) ? ACC_FIELDS_LIVE : ACC_FIELDS).map(([k, label, type]) => (
                                 <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}</span>
                                     <input type={type} value={form[k] ?? ''} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput} />
                                 </label>
                             ))}
-                            {[['type', 'Account type', ['Challenge', 'Instant', 'Funded']], ['phase', 'Phase', ['Phase 1', 'Phase 2', 'Funded']], ['ddType', 'Drawdown type', ['static', 'trailing', 'locked']], ['status', 'Status', ['Active', 'Passed', 'Breached']]].map(([k, label, opts]) => (
+                            {(isLiveAcc(form)
+                                ? [['ddType', 'Drawdown type', ['static', 'trailing']], ['status', 'Status', ['Active', 'Closed']]]
+                                : [['type', 'Account type', ['Challenge', 'Instant', 'Funded']], ['phase', 'Phase', ['Phase 1', 'Phase 2', 'Funded']], ['ddType', 'Drawdown type', ['static', 'trailing', 'locked']], ['status', 'Status', ['Active', 'Passed', 'Breached']]]
+                            ).map(([k, label, opts]) => (
                                 <label key={k} className="block"><span className="block font-bold mb-1 text-slate-400">{label}{k === 'ddType' ? ' (locked = trails, stops at start balance)' : ''}</span>
                                     <select value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} className={accInput}>{opts.map(o => <option key={o} value={o}>{o}</option>)}</select>
                                 </label>
@@ -895,8 +2082,8 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
 
             {!acc && !form && accounts.length === 0 && (
                 <div className="p-10 rounded-2xl border text-center bg-[#0E1426] border-[#232C45]">
-                    <div className="text-lg font-black text-white">Track your funded accounts</div>
-                    <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto">Add an account with its firm rules (daily loss, max drawdown, profit target) and MintPip will show how much room you have left, every day.</p>
+                    <div className="text-lg font-black text-white">Track your funded and live accounts</div>
+                    <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto">Add a funded account with its firm rules (daily loss, max drawdown, profit target), or a live account with your own money, and MintPip will track each one separately.</p>
                     <button onClick={() => setForm({ ...ACC_EMPTY })} className="mt-4 px-5 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Add your first account</button>
                 </div>
             )}
@@ -909,7 +2096,7 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
                     <div className={`${card} flex flex-wrap items-center justify-between gap-4`} style={{ borderLeft: `3px solid ${acc.color || '#6366F1'}` }}>
                         <div>
                             <div className="text-lg font-black text-white">{acc.name}</div>
-                            <div className="text-xs text-slate-400 mt-1">{acc.firm || 'No firm set'} · {acc.type} · {acc.phase} · {acc.status} · since {acc.startDate}</div>
+                            <div className="text-xs text-slate-400 mt-1">{isLiveAcc(acc) ? `${acc.firm || 'No broker set'} · Live account · ${acc.status}` : `${acc.firm || 'No firm set'} · ${acc.type} · ${acc.phase} · ${acc.status}`} · since {acc.startDate}</div>
                         </div>
                         <div className="flex items-center gap-3">
                             <span className="px-3 py-1.5 rounded-full text-[11px] font-extrabold" style={{ background: `${h.color}22`, color: h.color, border: `1px solid ${h.color}66` }}>● {h.label}</span>
@@ -921,46 +2108,63 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
 
                 {/* 2. Limits and rules */}
                 <section>
-                    <SectionHead title="Limits & progress" sub="How much room is left under this account's rules" />
+                    <SectionHead title="Limits & progress" sub={isLiveAcc(acc) ? 'Your own risk rules for this live account (optional)' : "How much room is left under this account's rules"} />
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                        <Meter title="Daily loss" main={`${fm(m.dailyUsed)} / ${fm(m.dailyLimit)}`} ratio={m.dailyRatio} color={m.dailyRatio >= 0.75 ? '#F43F5E' : m.dailyRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
-                            sub={`${fm(Math.max(0, m.dailyLeft))} left today · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`} />
-                        <Meter title={`Max drawdown (${acc.ddType})`} main={`${fm(Math.max(0, m.ddLeft))} left`} ratio={Math.max(0, m.ddRatio)} color={m.ddRatio >= 0.75 ? '#F43F5E' : m.ddRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
-                            sub={`Floor ${fm(m.floor)} · balance ${fm(m.bal)}`} />
-                        <Meter title="Profit target" main={m.target ? `${m.targetProgress.toFixed(0)}%` : 'No target'} ratio={m.targetProgress / 100} color="#6366F1"
-                            sub={m.target ? `${fm(m.profit)} of ${fm(m.target)}` : `Profit ${fm(m.profit)}`} />
+                        <Meter title="Daily loss" main={m.dailyLimit ? `${fm(m.dailyUsed)} / ${fm(m.dailyLimit)}` : `${fm(m.dailyUsed)} today`} ratio={m.dailyRatio} color={m.dailyRatio >= 0.75 ? '#F43F5E' : m.dailyRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                            sub={m.dailyLimit ? `${fm(Math.max(0, m.dailyLeft))} left today · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}` : `No daily limit set · today ${m.todayPnl >= 0 ? '+' : ''}${fm(m.todayPnl)}`} />
+                        <Meter title={isLiveAcc(acc) ? 'Drawdown' : `Max drawdown (${acc.ddType})`} main={m.dd ? `${fm(Math.max(0, m.ddLeft))} left` : `Peak ${fm(m.peak)}`} ratio={Math.max(0, m.ddRatio)} color={m.ddRatio >= 0.75 ? '#F43F5E' : m.ddRatio >= 0.5 ? '#F59E0B' : '#22C55E'}
+                            sub={m.dd ? `Floor ${fm(m.floor)} · balance ${fm(m.bal)}` : `No drawdown limit set · balance ${fm(m.bal)}`} />
+                        {isLiveAcc(acc) ? (
+                            <Meter title="Account growth" main={`${m.B0 ? ((m.profit / m.B0) * 100).toFixed(1) : '0.0'}%`} ratio={m.profit > 0 && m.B0 ? Math.min(1, m.profit / m.B0) : 0} color="#6366F1"
+                                sub={`${m.profit >= 0 ? '+' : ''}${fm(m.profit)} since start · balance ${fm(m.bal)}`} />
+                        ) : (
+                            <Meter title="Profit target" main={m.target ? `${m.targetProgress.toFixed(0)}%` : 'No target'} ratio={m.targetProgress / 100} color="#6366F1"
+                                sub={m.target ? `${fm(m.profit)} of ${fm(m.target)}` : `Profit ${fm(m.profit)}`} />
+                        )}
                         <div className={card}>
-                            <div className={lbl}>Rules check</div>
+                            <div className={lbl}>{isLiveAcc(acc) ? 'Summary' : 'Rules check'}</div>
                             <div className="mt-3 space-y-2.5 text-xs text-slate-300">
+                                {isLiveAcc(acc) ? (
+                                    <div className="flex justify-between"><span>Trading days</span><b className="text-white">{m.days}</b></div>
+                                ) : (<>
                                 <div className="flex justify-between"><span>Trading days</span><b className={Number(acc.minDays) && m.days < Number(acc.minDays) ? 'text-amber-400' : 'text-emerald-400'}>{m.days}{Number(acc.minDays) ? ` / ${acc.minDays}` : ''}</b></div>
                                 {Number(acc.consistencyPct) > 0 ? (
                                     <div className="flex justify-between"><span>Best day / profit</span><b className={m.consPct > Number(acc.consistencyPct) ? 'text-rose-400' : 'text-emerald-400'}>{m.consPct.toFixed(0)}% (max {acc.consistencyPct}%)</b></div>
                                 ) : <div className="flex justify-between"><span>Consistency rule</span><b className="text-slate-400">Off</b></div>}
+                                </>)}
                                 <div className="flex justify-between"><span>Best day</span><b className="text-white">{fm(m.bestDay)}</b></div>
                                 <div className="flex justify-between"><span>Peak balance</span><b className="text-white">{fm(m.peak)}</b></div>
                             </div>
                         </div>
                     </div>
                     <p className="text-[11px] text-slate-400 leading-relaxed mt-3">
-                        Only closed trades saved against this account are counted, so floating loss is not included. Treat these meters as a guide and rely on your firm's own dashboard for the official limits.
+                        Only closed trades saved against this account are counted, so floating loss is not included. {isLiveAcc(acc) ? 'Treat these meters as a guide and check your broker statement for the real balance.' : "Treat these meters as a guide and rely on your firm's own dashboard for the official limits."}
                     </p>
                 </section>
 
                 {/* 3. Payouts for THIS account */}
                 <section>
-                    <SectionHead title="Payouts" sub={`Fee and payouts for ${acc.name} only`} />
+                    <SectionHead title={isLiveAcc(acc) ? 'Withdrawals' : 'Payouts'} sub={isLiveAcc(acc) ? `Money you took out of ${acc.name}` : `Fee and payouts for ${acc.name} only`} />
                     <div className={`${card} space-y-5`}>
+                        {isLiveAcc(acc) ? (
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                <div><div className={lbl}>Starting deposit</div><div className="text-white font-black text-xl mt-1">{fm(m.B0)}</div></div>
+                                <div><div className={lbl}>Withdrawn</div><div className="text-emerald-400 font-black text-xl mt-1">{fm(sumPayouts(acc))}</div></div>
+                                <div><div className={lbl}>Total return (balance + withdrawn − deposit)</div><div className={`font-black text-xl mt-1 ${netCls(m.bal + sumPayouts(acc) - m.B0)}`}>{fm(m.bal + sumPayouts(acc) - m.B0)}</div></div>
+                            </div>
+                        ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                             <div><div className={lbl}>Challenge fee</div><div className="text-white font-black text-xl mt-1">{fm(Number(acc.fee) || 0)}</div></div>
                             <div><div className={lbl}>Payouts received</div><div className="text-emerald-400 font-black text-xl mt-1">{fm(sumPayouts(acc))}</div></div>
                             <div><div className={lbl}>Net for this account</div><div className={`font-black text-xl mt-1 ${netCls(sumPayouts(acc) - (Number(acc.fee) || 0))}`}>{fm(sumPayouts(acc) - (Number(acc.fee) || 0))}</div></div>
                         </div>
+                        )}
                         <div className="pt-5 border-t border-[#232C45]">
-                            <div className="text-xs font-bold text-white mb-3">Record a payout</div>
+                            <div className="text-xs font-bold text-white mb-3">{isLiveAcc(acc) ? 'Record a withdrawal' : 'Record a payout'}</div>
                             <div className="flex flex-wrap items-end gap-2">
-                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Payout date</span><input type="date" value={payout.date} onChange={(e) => setPayout({ ...payout, date: e.target.value })} className={accInput} /></label>
-                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">Amount received ($)</span><input type="number" value={payout.amount} onChange={(e) => setPayout({ ...payout, amount: e.target.value })} className={accInput} /></label>
-                                <button onClick={addPayout} className="px-4 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">Add payout</button>
+                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">{isLiveAcc(acc) ? 'Withdrawal date' : 'Payout date'}</span><input type="date" value={payout.date} onChange={(e) => setPayout({ ...payout, date: e.target.value })} className={accInput} /></label>
+                                <label className="text-xs"><span className="block font-bold mb-1 text-slate-400">{isLiveAcc(acc) ? 'Amount withdrawn ($)' : 'Amount received ($)'}</span><input type="number" value={payout.amount} onChange={(e) => setPayout({ ...payout, amount: e.target.value })} className={accInput} /></label>
+                                <button onClick={addPayout} className="px-4 py-2.5 rounded-xl text-xs font-bold bg-[#6366F1] text-white">{isLiveAcc(acc) ? 'Add withdrawal' : 'Add payout'}</button>
                             </div>
                             {(acc.payouts || []).length > 0 && (
                                 <div className="flex flex-wrap gap-2 mt-4">
@@ -978,7 +2182,7 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
 
                 {/* 4. Portfolio-wide totals, kept apart from the selected account */}
                 <section>
-                    <SectionHead title="All accounts" sub="Fees and payouts across every account. Click a row to switch to it." />
+                    <SectionHead title="All accounts" sub="Fees and payouts across your funded accounts (live accounts are listed but not included in the totals). Click a row to switch to it." />
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                         <div className={card}><div className={lbl}>Fees paid</div><div className="text-white font-black text-xl mt-1">{fm(totalFees)}</div></div>
                         <div className={card}><div className={lbl}>Payouts received</div><div className="text-emerald-400 font-black text-xl mt-1">{fm(totalPayouts)}</div></div>
@@ -1005,9 +2209,9 @@ function AccountsPanel({ accounts, onSave, onDelete, onSelect, activeId, trades,
                                                 <span className="text-slate-400"> · {a.type}</span>
                                             </td>
                                             <td className="px-3 py-3 text-slate-300">{a.status}</td>
-                                            <td className="px-3 py-3 text-right text-slate-300">{fm(fee)}</td>
-                                            <td className="px-3 py-3 text-right text-emerald-400 font-bold">{fm(pay)}</td>
-                                            <td className={`px-5 py-3 text-right font-black ${netCls(pay - fee)}`}>{fm(pay - fee)}</td>
+                                            <td className="px-3 py-3 text-right text-slate-300">{isLiveAcc(a) ? '—' : fm(fee)}</td>
+                                            <td className="px-3 py-3 text-right text-emerald-400 font-bold">{fm(pay)}{isLiveAcc(a) ? <span className="text-slate-500 font-semibold"> w/d</span> : null}</td>
+                                            <td className={`px-5 py-3 text-right font-black ${isLiveAcc(a) ? 'text-slate-500' : netCls(pay - fee)}`}>{isLiveAcc(a) ? '—' : fm(pay - fee)}</td>
                                         </tr>
                                     );
                                 })}
@@ -1161,7 +2365,8 @@ const TAB_META = {
     overview: ['Overview', 'Results and equity growth for the selected account'],
     analytics: ['Analytics', 'Risk, drawdown and where your edge comes from'],
     calendar: ['Calendar & Reports', 'Day-by-day results and reports'],
-    accounts: ['Accounts', 'Rules, limits and payouts for each funded account']
+    accounts: ['Accounts', 'Rules, limits and payouts for each funded or live account'],
+    analyzer: ['ICT Chart Analyzer', 'A second opinion on your chart from a vision AI']
 };
 
 function AccountDropdown({ accounts, activeId, setActiveId, trades, legacyCount, onManage }) {
@@ -1200,14 +2405,14 @@ function AccountDropdown({ accounts, activeId, setActiveId, trades, legacyCount,
                 <span className="flex-1 min-w-0">
                     <span className="block text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Account</span>
                     <span className="block text-sm font-black text-white truncate">{isLegacy ? 'Unassigned trades' : acc ? acc.name : 'Select an account'}</span>
-                    <span className="block text-[11px] text-slate-400 truncate">{acc ? `${acc.firm || 'No firm set'} · ${acc.type}` : isLegacy ? `${legacyCount} older trades` : 'Choose which account to view'}</span>
+                    <span className="block text-[11px] text-slate-400 truncate">{acc ? `${acc.firm || (isLiveAcc(acc) ? 'No broker set' : 'No firm set')} · ${isLiveAcc(acc) ? 'Live account' : acc.type}` : isLegacy ? `${legacyCount} older trades` : 'Choose which account to view'}</span>
                 </span>
                 <svg className={`w-4 h-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
             </button>
             {open && (
                 <div role="listbox" className="absolute right-0 left-0 sm:left-auto sm:w-[340px] mt-2 z-40 rounded-xl border bg-[#0E1426] border-[#232C45] p-1.5 max-h-[70vh] overflow-y-auto" style={{ boxShadow: '0 24px 60px -12px rgba(0,0,0,.55)' }}>
-                    <div className="px-3 pt-2 pb-1.5 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Funded accounts</div>
-                    {accounts.map(a => row(a.id, a.color || '#6366F1', a.name, `${a.firm || 'No firm set'} · ${a.type} · ${a.status}`))}
+                    <div className="px-3 pt-2 pb-1.5 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Your accounts</div>
+                    {accounts.map(a => row(a.id, a.color || '#6366F1', a.name, `${a.firm || (isLiveAcc(a) ? 'No broker set' : 'No firm set')} · ${isLiveAcc(a) ? 'Live account' : a.type} · ${a.status}`))}
                     {legacyCount > 0 && (<>
                         <div className="px-3 pt-3 pb-1.5 text-[10px] font-extrabold uppercase tracking-widest text-slate-500">Other</div>
                         {row('__legacy', '#64748B', 'Unassigned trades', `${legacyCount} trades saved before accounts existed`)}
@@ -1245,7 +2450,7 @@ function PageToolbar({ tab, isLive, accounts, activeId, setActiveId, trades, leg
             </div>
             {isLive && accounts.length === 0 && (
                 <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl border bg-[#0E1426] border-[#232C45]">
-                    <span className="text-xs font-bold text-slate-300">No funded account yet. Create one so every trade is tracked against its own rules.</span>
+                    <span className="text-xs font-bold text-slate-300">No account yet (funded or live). Create one so every trade is tracked against its own rules.</span>
                     <button onClick={onManage} className="px-4 py-2 rounded-xl text-xs font-bold bg-[#6366F1] text-white">+ Create account</button>
                 </div>
             )}
@@ -1274,7 +2479,268 @@ const rangeTrades = (list, rng) => {
     return list.filter(t => t.date >= key);
 };
 
-export default function App() {
+// ---------------------------------------------------------------------------
+// ICT Chart Analyzer: upload / paste a chart screenshot, a vision AI gives a structured second opinion
+// ---------------------------------------------------------------------------
+const AN_TF = ['1m', '3m', '5m', '15m', '1H', '4H', 'Daily'];
+const AN_PAIRS = ['EUR/USD', 'GBP/USD', 'XAU/USD', 'GBP/JPY', 'USD/JPY', 'NAS100', 'US30'];
+const AN_STEPS = ['Reading the chart…', 'Mapping structure and liquidity…', 'Checking FVGs and order blocks…', 'Scoring your execution rules…', 'Writing the analysis…'];
+const AN_BIAS = { bullish: ['text-emerald-300', 'bg-emerald-500/15', 'border-emerald-500/40', '#22C55E'], bearish: ['text-rose-300', 'bg-rose-500/15', 'border-rose-500/40', '#F43F5E'], neutral: ['text-amber-300', 'bg-amber-500/15', 'border-amber-500/40', '#F59E0B'] };
+
+const compressImage = (file, maxSide = 1600) => new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob((blob) => {
+            if (!blob) return reject(new Error('Could not read this image.'));
+            const reader = new FileReader();
+            reader.onload = () => resolve({ dataUrl: reader.result, file: new File([blob], `chart-${Date.now()}.jpg`, { type: 'image/jpeg' }) });
+            reader.readAsDataURL(blob);
+        }, 'image/jpeg', 0.86);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('This file is not a valid image.')); };
+    img.src = url;
+});
+
+const AnSec = ({ title, children }) => (
+    <div className="p-4 rounded-xl border bg-[#141B30] border-[#232C45]">
+        <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-2.5">{title}</div>
+        {children}
+    </div>
+);
+const anInput = 'w-full px-3 py-2 rounded-xl border text-xs bg-[#141B30] border-[#232C45] text-slate-200';
+
+function ChartAnalyzer({ apiBase, onUseInJournal }) {
+    const [shots, setShots] = useState({ main: null, htf: null });
+    const shotsRef = useRef(shots);
+    shotsRef.current = shots;
+    const [f, setF] = useState({ chartMode: 'clean', pair: '', timeframe: '5m', session: 'London', userBias: '', entry: '', sl: '', tp: '', notes: '' });
+    const [busy, setBusy] = useState(false);
+    const [step, setStep] = useState(0);
+    const [res, setRes] = useState(null);
+    const [err, setErr] = useState('');
+    const [copied, setCopied] = useState(false);
+    const [hist, setHist] = useState(() => { try { return JSON.parse(localStorage.getItem('mp-chart-history') || '[]'); } catch (e) { return []; } });
+    const fileRefs = { main: useRef(null), htf: useRef(null) };
+
+    const addImage = async (slot, file) => {
+        if (!file || !/^image\//.test(file.type)) { setErr('Please choose an image file (PNG, JPG or WEBP).'); return; }
+        try {
+            setErr('');
+            const out = await compressImage(file);
+            setShots(s => ({ ...s, [slot]: out }));
+        } catch (e) { setErr(e.message); }
+    };
+
+    useEffect(() => { // Ctrl+V anywhere on this tab pastes a screenshot (first into Main, then into Higher-timeframe)
+        const onPaste = (e) => {
+            const item = [...((e.clipboardData && e.clipboardData.items) || [])].find(i => i.type.startsWith('image/'));
+            if (!item) return;
+            e.preventDefault();
+            addImage(shotsRef.current.main ? 'htf' : 'main', item.getAsFile());
+        };
+        window.addEventListener('paste', onPaste);
+        return () => window.removeEventListener('paste', onPaste);
+    }, []);
+
+    const analyze = async () => {
+        if (!shots.main) { setErr('Add your main chart screenshot first.'); return; }
+        setBusy(true); setErr(''); setRes(null); setStep(0);
+        const tick = setInterval(() => setStep(s => Math.min(s + 1, AN_STEPS.length - 1)), 3000);
+        try {
+            const images = [{ role: 'main', dataUrl: shots.main.dataUrl }, ...(shots.htf ? [{ role: 'htf', dataUrl: shots.htf.dataUrl }] : [])];
+            const r = await fetch(`${apiBase}/api/chart-analysis`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ images, ...f }) });
+            const d = await r.json().catch(() => ({}));
+            if (r.status === 404) throw new Error('The running server answered 404 for /api/chart-analysis. Open http://localhost:5000/api/chart-analysis in your browser: if it does not show "ready": true, the server that is running is still an old index.js (check the folder and restart it).');
+            if (!r.ok || !d.analysis) throw new Error(d.error || `Request failed (${r.status})`);
+            setRes({ a: d.analysis, model: d.model, ms: d.ms, form: { ...f } });
+            const entry = { id: Date.now(), ts: new Date().toISOString(), pair: f.pair || d.analysis.symbolSeen || '—', tf: f.timeframe, a: d.analysis };
+            const next = [entry, ...hist].slice(0, 12);
+            setHist(next);
+            try { localStorage.setItem('mp-chart-history', JSON.stringify(next)); } catch (e) { }
+        } catch (e) { setErr(e.message || 'Something went wrong.'); }
+        finally { clearInterval(tick); setBusy(false); }
+    };
+
+    const toJournal = () => {
+        const a = res.a, fm0 = res.form;
+        const pairKey = ['GBP/USD', 'EUR/USD'].find(p => p.replace('/', '') === String(fm0.pair || '').toUpperCase().replace(/[^A-Z]/g, ''));
+        const dir = a.tradeIdea.direction === 'sell' ? 'SELL' : a.tradeIdea.direction === 'buy' ? 'BUY' : '';
+        onUseInJournal({
+            pairDirection: pairKey && dir ? `${pairKey} - ${dir}` : '',
+            session: fm0.session === 'London' ? 'LN SILVER BULLET' : fm0.session === 'New York' ? 'NY SILVER BULLET' : '',
+            executionRules: a.checklist.filter(c => c.status === 'met').map(c => c.rule),
+            entryPrice: fm0.entry || '',
+            slPrice: fm0.sl || '',
+            note: `AI chart analysis${a.chartMode === 'marked' ? ' of my marked-up chart' : ''} (${a.bias}, ${a.confidence}% confidence): ${a.summary}${a.tradeIdea.invalidation ? `\nInvalidation: ${a.tradeIdea.invalidation}` : ''}`,
+            beforeChartFiles: shots.main ? [shots.main.file] : []
+        });
+    };
+
+    const copyText = () => {
+        const a = res.a;
+        const t = `${f.pair || a.symbolSeen} ${f.timeframe} | Bias: ${a.bias} (${a.confidence}%) | Setup score ${a.setupScore}%\n${a.summary}\nIdea: ${a.tradeIdea.direction} | Entry ${a.tradeIdea.entryZone || '—'} | SL ${a.tradeIdea.stopLoss || '—'} | TP ${a.tradeIdea.takeProfit || '—'}\nInvalidation: ${a.tradeIdea.invalidation || '—'}`;
+        try { navigator.clipboard.writeText(t); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch (e) { }
+    };
+
+    const Drop = ({ slot, title, hint }) => {
+        const s = shots[slot];
+        return (
+            <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); addImage(slot, e.dataTransfer.files[0]); }}
+                onClick={() => !s && fileRefs[slot].current && fileRefs[slot].current.click()}
+                className={`relative rounded-2xl border-2 border-dashed p-3 text-center transition-colors ${s ? 'border-[#232C45] bg-[#0E1426]' : 'border-indigo-500/40 bg-indigo-500/5 hover:bg-indigo-500/10 cursor-pointer'}`}>
+                <input ref={fileRefs[slot]} type="file" accept="image/*" className="hidden" onChange={(e) => { addImage(slot, e.target.files[0]); e.target.value = ''; }} />
+                {s ? (
+                    <>
+                        <img src={s.dataUrl} alt={title} className="w-full max-h-52 object-contain rounded-lg" />
+                        <button onClick={(e) => { e.stopPropagation(); setShots(x => ({ ...x, [slot]: null })); }} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/70 text-white flex items-center justify-center"><Ico n="x" className="w-3.5 h-3.5" /></button>
+                    </>
+                ) : (
+                    <div className="py-7">
+                        <div className="text-xs font-black text-slate-200">{title}</div>
+                        <div className="text-[11px] text-slate-400 mt-1.5">{hint}</div>
+                        <div className="text-[10px] text-slate-500 mt-2">Click, drag &amp; drop, or press Ctrl+V</div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const a = res && res.a;
+    const bc = a ? AN_BIAS[a.bias] : null;
+    const st = { met: ['✓', 'text-emerald-400'], not_met: ['✕', 'text-rose-400'], unclear: ['?', 'text-amber-400'] };
+
+    return (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+            <div className="lg:col-span-2 space-y-4">
+                <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4">
+                    <div><div className="text-sm font-black text-white">ICT Chart Analyzer</div><div className="text-[11px] text-slate-400 mt-1">A second opinion on your chart. It reads structure, liquidity and PD arrays, and checks your execution rules.</div></div>
+                    <Drop slot="main" title="Main chart (entry timeframe)" hint="Required" />
+                    <Drop slot="htf" title="Higher-timeframe chart" hint="Optional, gives context" />
+                    <div>
+                        <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-1.5">What is on this chart?</div>
+                        <div className="grid grid-cols-2 gap-2">
+                            {[['clean', 'Clean chart', 'Not analysed yet'], ['marked', 'My analysis marked', 'I drew lines / boxes']].map(([k, t, sub]) => (
+                                <button key={k} onClick={() => setF({ ...f, chartMode: k })} className={`p-3 rounded-xl border text-left transition-colors ${f.chartMode === k ? 'bg-indigo-500/15 border-indigo-500/60' : 'bg-[#141B30] border-[#232C45]'}`}>
+                                    <div className={`text-xs font-black ${f.chartMode === k ? 'text-indigo-300' : 'text-slate-200'}`}>{t}</div>
+                                    <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-1.5">{f.chartMode === 'marked' ? 'The AI will review your markup and tell you where it agrees or disagrees.' : 'The AI will analyse the chart from scratch.'}</div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                        <label><span className="block font-bold mb-1 text-slate-400">Pair</span><input list="an-pairs" value={f.pair} onChange={(e) => setF({ ...f, pair: e.target.value })} placeholder="GBP/USD" className={anInput} /><datalist id="an-pairs">{AN_PAIRS.map(p => <option key={p} value={p} />)}</datalist></label>
+                        <label><span className="block font-bold mb-1 text-slate-400">Timeframe</span><select value={f.timeframe} onChange={(e) => setF({ ...f, timeframe: e.target.value })} className={anInput}>{AN_TF.map(t => <option key={t}>{t}</option>)}</select></label>
+                        <label><span className="block font-bold mb-1 text-slate-400">Session</span><select value={f.session} onChange={(e) => setF({ ...f, session: e.target.value })} className={anInput}>{['London', 'New York', 'Asia', 'Other'].map(t => <option key={t}>{t}</option>)}</select></label>
+                        <label><span className="block font-bold mb-1 text-slate-400">My bias</span><select value={f.userBias} onChange={(e) => setF({ ...f, userBias: e.target.value })} className={anInput}><option value="">None</option><option>Bullish</option><option>Bearish</option></select></label>
+                        <label><span className="block font-bold mb-1 text-slate-400">Entry (optional)</span><input value={f.entry} onChange={(e) => setF({ ...f, entry: e.target.value })} className={anInput} /></label>
+                        <label><span className="block font-bold mb-1 text-slate-400">Stop loss (optional)</span><input value={f.sl} onChange={(e) => setF({ ...f, sl: e.target.value })} className={anInput} /></label>
+                        <label className="col-span-2"><span className="block font-bold mb-1 text-slate-400">Take profit (optional)</span><input value={f.tp} onChange={(e) => setF({ ...f, tp: e.target.value })} className={anInput} /></label>
+                        <label className="col-span-2"><span className="block font-bold mb-1 text-slate-400">Notes for the AI (optional)</span><textarea rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="e.g. Asia high swept at 08:40, looking for a short" className={anInput}></textarea></label>
+                    </div>
+                    {err && <div className="p-3 rounded-xl border text-xs font-bold bg-rose-500/10 border-rose-500/30 text-rose-300">{err}</div>}
+                    <button onClick={analyze} disabled={busy} className="w-full py-3 rounded-xl text-xs font-extrabold bg-[#6366F1] text-white disabled:opacity-60">{busy ? 'Analysing…' : 'Analyse chart'}</button>
+                </div>
+            </div>
+
+            <div className="lg:col-span-3 space-y-4">
+                {busy && (
+                    <div className="p-10 rounded-2xl border bg-[#0E1426] border-[#232C45] text-center">
+                        <div className="mx-auto w-10 h-10 rounded-full border-2 border-indigo-500/30 border-t-indigo-400 animate-spin"></div>
+                        <div className="mt-4 text-sm font-bold text-white">{AN_STEPS[step]}</div>
+                        <div className="mt-1 text-[11px] text-slate-400">Free AI models can take up to a minute.</div>
+                    </div>
+                )}
+
+                {!busy && !a && (
+                    <div className="p-10 rounded-2xl border bg-[#0E1426] border-[#232C45] text-center">
+                        <div className="text-sm font-black text-white">Your analysis will appear here</div>
+                        <p className="text-[11px] text-slate-400 mt-2 max-w-sm mx-auto leading-relaxed">Add a clear screenshot with the price axis visible. A clean chart with fewer indicators gives a more reliable reading.</p>
+                    </div>
+                )}
+
+                {!busy && a && (<>
+                    {!a.chartReadable && <div className="p-4 rounded-2xl border text-xs font-bold bg-amber-500/10 border-amber-500/30 text-amber-300">The AI could not read this chart properly. {a.readabilityNote}</div>}
+                    <div className="p-5 rounded-2xl border bg-[#0E1426] border-[#232C45] space-y-4" style={{ borderTop: `3px solid ${bc[3]}` }}>
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                                <span className={`px-4 py-2 rounded-xl text-sm font-black uppercase border ${bc[0]} ${bc[1]} ${bc[2]}`}>{a.bias}</span>
+                                <div><div className="text-xs font-bold text-slate-300">{f.pair || a.symbolSeen || 'Chart'} · {res.form.timeframe}{a.timeframeSeen ? ` (read as ${a.timeframeSeen})` : ''}</div><div className="text-[10px] text-slate-400">{a.chartMode === 'marked' ? 'Your markup reviewed' : 'Clean chart analysed'} · Model: {res.model} · {(res.ms / 1000).toFixed(0)}s</div></div>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={copyText} className="px-3 py-2 rounded-xl text-[11px] font-bold bg-[#141B30] border border-[#232C45] text-slate-300">{copied ? 'Copied ✓' : 'Copy'}</button>
+                                <button onClick={toJournal} className="px-3 py-2 rounded-xl text-[11px] font-bold bg-[#6366F1] text-white">Add to journal</button>
+                            </div>
+                        </div>
+                        <p className="text-sm leading-relaxed text-slate-200">{a.summary}</p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div><div className="flex justify-between text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-1.5"><span>Confidence</span><b className="text-slate-200">{a.confidence}%</b></div><div className="h-2.5 rounded-full overflow-hidden" style={{ background: 'rgba(148,163,184,0.18)' }}><div className="h-full rounded-full" style={{ width: `${a.confidence}%`, background: bc[3], transition: 'width 1s ease' }}></div></div></div>
+                            <div><div className="flex justify-between text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-1.5"><span>Setup score</span><b className="text-slate-200">{a.setupScore}%</b></div><div className="h-2.5 rounded-full overflow-hidden" style={{ background: 'rgba(148,163,184,0.18)' }}><div className="h-full rounded-full" style={{ width: `${a.setupScore}%`, background: a.setupScore >= 80 ? '#22C55E' : a.setupScore >= 60 ? '#F59E0B' : '#F43F5E', transition: 'width 1s ease' }}></div></div></div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <AnSec title="Market structure">{a.structure.length ? a.structure.map((x, i) => <div key={i} className="mb-2 last:mb-0"><div className="text-xs font-bold text-slate-200">{x.label}</div><div className="text-[11px] text-slate-400 leading-relaxed">{x.detail}</div></div>) : <div className="text-[11px] text-slate-400">Nothing clear.</div>}</AnSec>
+                        <AnSec title="Liquidity">{a.liquidity.length ? a.liquidity.map((x, i) => <div key={i} className="mb-2 last:mb-0"><div className="text-xs font-bold text-slate-200">{x.label}{x.side ? <span className="ml-2 text-[10px] text-indigo-300">{x.side}</span> : null}</div><div className="text-[11px] text-slate-400 leading-relaxed">{x.detail}</div></div>) : <div className="text-[11px] text-slate-400">Nothing clear.</div>}</AnSec>
+                        <AnSec title="PD arrays">{a.pdArrays.length ? a.pdArrays.map((x, i) => <div key={i} className="mb-2 last:mb-0"><div className="text-xs font-bold text-slate-200">{x.type} <span className={x.direction === 'bullish' ? 'text-emerald-400' : 'text-rose-400'}>{x.direction}</span> · {x.zone || 'zone unclear'}</div><div className="text-[11px] text-slate-400 leading-relaxed">{x.note}</div></div>) : <div className="text-[11px] text-slate-400">None identified.</div>}<div className="text-[11px] text-slate-400 mt-2">Price is in <b className="text-slate-200">{a.premiumDiscount}</b></div></AnSec>
+                        <AnSec title="Time &amp; session"><div className="text-[11px] text-slate-300 leading-relaxed">{a.timeContext || 'No time information visible.'}</div></AnSec>
+                    </div>
+
+                    {a.chartMode === 'marked' && (
+                        <AnSec title="Your markup vs price action">
+                            <div className={`inline-block px-3 py-1 rounded-full text-[11px] font-extrabold border mb-2 ${a.markupReview.agrees === 'yes' ? 'text-emerald-300 bg-emerald-500/15 border-emerald-500/40' : a.markupReview.agrees === 'no' ? 'text-rose-300 bg-rose-500/15 border-rose-500/40' : 'text-amber-300 bg-amber-500/15 border-amber-500/40'}`}>{a.markupReview.agrees === 'yes' ? 'AI agrees with your markup' : a.markupReview.agrees === 'partly' ? 'AI partly agrees' : a.markupReview.agrees === 'no' ? 'AI disagrees with your markup' : 'No markup detected'}</div>
+                            <div className="text-[11px] text-slate-300 leading-relaxed">{a.markupReview.notes || 'No notes.'}</div>
+                        </AnSec>
+                    )}
+
+                    <AnSec title="Trade idea">
+                        {a.tradeIdea.direction === 'none' ? <div className="text-xs text-slate-300">No clear trade idea. {a.tradeIdea.reasoning}</div> : (<>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                                {[['Direction', a.tradeIdea.direction.toUpperCase()], ['Entry zone', a.tradeIdea.entryZone], ['Stop loss', a.tradeIdea.stopLoss], ['Take profit', a.tradeIdea.takeProfit]].map(([k, v]) => <div key={k}><div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">{k}</div><div className={`mt-1 font-black ${k === 'Direction' ? (a.tradeIdea.direction === 'buy' ? 'text-emerald-400' : 'text-rose-400') : 'text-white'}`}>{v || 'unclear'}</div></div>)}
+                            </div>
+                            {a.tradeIdea.rr && <div className="text-[11px] text-slate-400 mt-2">R:R {a.tradeIdea.rr}</div>}
+                            <div className="text-[11px] text-slate-300 mt-2 leading-relaxed">{a.tradeIdea.reasoning}</div>
+                            {a.tradeIdea.invalidation && <div className="text-[11px] mt-2 text-rose-300">Invalidation: {a.tradeIdea.invalidation}</div>}
+                        </>)}
+                    </AnSec>
+
+                    <AnSec title="Execution rules">
+                        {a.checklist.map(c => (
+                            <div key={c.rule} className="flex items-start gap-3 py-2 border-b border-[#232C45] last:border-0">
+                                <span className={`w-5 text-center font-black ${st[c.status][1]}`}>{st[c.status][0]}</span>
+                                <div><div className="text-xs font-bold text-slate-200">{c.rule}</div>{c.evidence && <div className="text-[11px] text-slate-400">{c.evidence}</div>}</div>
+                            </div>
+                        ))}
+                    </AnSec>
+
+                    {a.warnings.length > 0 && <div className="p-4 rounded-2xl border bg-amber-500/10 border-amber-500/30 text-[11px] text-amber-300 space-y-1">{a.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}</div>}
+                    <p className="text-[10px] text-slate-500 leading-relaxed">Educational analysis from a free AI model. It can misread charts, so always verify every level on your own chart. This is not financial advice or a trade signal.</p>
+                </>)}
+
+                {hist.length > 0 && (
+                    <AnSec title="Recent analyses">
+                        <div className="flex flex-wrap gap-2">
+                            {hist.map(h => (
+                                <button key={h.id} onClick={() => { setRes({ a: h.a, model: 'saved', ms: 0, form: { ...f, pair: h.pair, timeframe: h.tf } }); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 rounded-lg text-[11px] font-bold border bg-[#0E1426] border-[#232C45] text-slate-300">
+                                    {h.a.chartMode === 'marked' ? '✎ ' : ''}{h.pair} · {h.tf} · <span className={h.a.bias === 'bullish' ? 'text-emerald-400' : h.a.bias === 'bearish' ? 'text-rose-400' : 'text-amber-400'}>{h.a.bias}</span> · {h.a.setupScore}%
+                                </button>
+                            ))}
+                        </div>
+                    </AnSec>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function MintPipApp() {
     const [activeDatabase, setActiveDatabase] = useState('live'); // 'live' kinva 'backtest'
     const [trades, setTrades] = useState([]);
     const [currentTimeframeMode, setCurrentTimeframeMode] = useState('weekly');
@@ -1314,6 +2780,9 @@ export default function App() {
 
     // AI report modal (state lives inside <AiReportModal />)
     const [isAiOpen, setIsAiOpen] = useState(false);
+    const [isChecklistOpen, setIsChecklistOpen] = useState(false); // daily pre-trade checklist (live only)
+    const [isMt5Open, setIsMt5Open] = useState(false); // MT5 report import
+    const [isPendingOpen, setIsPendingOpen] = useState(false); // trades that still need session / SMT / rules...
 
     const [activeItems, setActiveItems] = useState([]);
     const [activeImgIndex, setActiveImgIndex] = useState(0);
@@ -1425,7 +2894,7 @@ export default function App() {
     const [activeTab, setActiveTab] = useState(() => {
         try {
             const v = localStorage.getItem('mintpip_tab');
-            return ['overview', 'analytics', 'calendar', 'accounts'].includes(v) ? v : 'overview';
+            return ['overview', 'analytics', 'calendar', 'accounts', 'analyzer'].includes(v) ? v : 'overview';
         } catch (_) { return 'overview'; }
     });
     useEffect(() => {
@@ -1444,9 +2913,9 @@ export default function App() {
     // Closing the Add Trade window (any way: X, Cancel, outside click, Esc, after save) clears every input
     // 🧮 Auto-calculate PLANE TARGET (1:2) pips whenever Entry / SL / Pair change
     useEffect(() => {
-        const next = buildPlaneTarget(newTradeForm.entryPrice, newTradeForm.slPrice, newTradeForm.pairDirection);
+        const next = buildPlaneTarget(newTradeForm.entryPrice, newTradeForm.slPrice, newTradeForm.pairDirection, newTradeForm.tpPrice);
         setNewTradeForm(prev => prev.planeTarget === next ? prev : { ...prev, planeTarget: next });
-    }, [newTradeForm.entryPrice, newTradeForm.slPrice, newTradeForm.pairDirection]);
+    }, [newTradeForm.entryPrice, newTradeForm.slPrice, newTradeForm.pairDirection, newTradeForm.tpPrice]);
 
     const closeAddModal = () => {
         setIsAddModalOpen(false);
@@ -1777,6 +3246,25 @@ export default function App() {
     };
 
     // ✏️ Open the Add Trade window pre-filled with an existing trade
+    // Opens the Add Trade form pre-filled from a Chart Analyzer result (the analysed screenshot is attached as the Before chart)
+    // MT5 trades that still miss details only the trader can supply (shown on the bell icon)
+    const pendingCount = activeDatabase === 'live' ? trades.filter(t => t.source === 'mt5' && missingDetails(t).length > 0).length : 0;
+
+    // Live trades: the daily checklist must be completed once per day before the Add Trade form opens
+    const requestAddTrade = () => {
+        if (activeDatabase === 'live' && !checklistOff() && !checklistDoneToday()) { setIsChecklistOpen(true); return; }
+        setIsAddModalOpen(true);
+    };
+
+    const openTradeFromAnalysis = (prefill) => {
+        setEditingPageId(null);
+        setNewTradeForm({ ...getDefaultTradeForm(), ...prefill });
+        setFormKey(k => k + 1);
+        setIsDetailsOpen(false);
+        setIsDateModalOpen(false);
+        setIsAddModalOpen(true);
+    };
+
     const openEditTrade = (t) => {
         if (!t || !t.pageId) return;
         setEditingPageId(t.pageId);
@@ -1788,10 +3276,21 @@ export default function App() {
             session: t.sessionRaw || '',
             fvgTap: t.fvgTap || '',
             smtDivergence: t.smt || '',
+            ...(() => { const p = parseSmt(t.smt); return { smtType: p.none ? 'NO SMT' : p.type, smtPair: p.pair }; })(), // pair 'DXY' is kept; GBPUSD/EURUSD are re-derived automatically
             executionRules: t.rules || [],
             psychologicalState: t.psych || [],
+            setupTags: t.setupTags || [],
+            mistakes: t.mistakes || [],
             entryPrice: t.entryPrice !== null && t.entryPrice !== undefined ? formatPrice5(t.entryPrice) : '',
             slPrice: t.slPrice !== null && t.slPrice !== undefined ? formatPrice5(t.slPrice) : '',
+            tpPrice: (() => {
+                if (t.tpPrice !== null && t.tpPrice !== undefined && t.tpPrice !== '') return formatPrice5(t.tpPrice);
+                // older trades: rebuild the TP price from the saved TP pips
+                const en = parseFloat(t.entryPrice), sl = parseFloat(t.slPrice), tpp = parseFloat(t.tpPips);
+                if (!Number.isFinite(en) || !Number.isFinite(sl) || !Number.isFinite(tpp) || tpp <= 0) return '';
+                const up = sl < en; // stop below entry = BUY
+                return formatPrice5(en + (up ? 1 : -1) * tpp * getPipSize(t.pairTag));
+            })(),
             lotSizeRisk: t.lotSize !== null && t.lotSize !== undefined ? String(t.lotSize) : '',
             outcome: t.outcomeRaw || t.result,
             profitAmount: t.profitAmount ? String(t.profitAmount) : '',
@@ -1867,12 +3366,14 @@ export default function App() {
         if (!newTradeForm.pairDirection) missing.push('Pair & Direction');
         if (!newTradeForm.session) missing.push('Session & Time');
         if (!newTradeForm.fvgTap) missing.push('15 FVG Tap');
-        if (!newTradeForm.smtDivergence) missing.push('SMT Divergence');
+        if (!newTradeForm.smtType) missing.push('SMT Divergence');
+        else if (newTradeForm.smtType !== 'NO SMT' && !buildSmt(newTradeForm)) missing.push('SMT pair (select PAIR & DIRECTION first, or choose DXY)');
         if (!newTradeForm.outcome) missing.push('Outcome');
         if (activeDatabase === 'live' && !resolveAccountId()) missing.push(accounts.length ? 'Account (choose which funded account this trade belongs to)' : 'Account (create one in the Accounts tab first)');
         if (!String(newTradeForm.lotSizeRisk).trim()) missing.push('Lot Size & Risk');
         if (!String(newTradeForm.entryPrice).trim()) missing.push('Entry Price');
         if (!String(newTradeForm.slPrice).trim()) missing.push('SL Price');
+        if (!String(newTradeForm.tpPrice).trim()) missing.push('TP Price (needed to calculate the RR)');
         if (!editingPageId && newTradeForm.beforeChartFiles.length === 0 && countLinks(newTradeForm.beforeCharts) === 0) missing.push('Before Chart image (upload a file or paste a link)');
         if (!editingPageId && newTradeForm.afterChartFiles.length === 0 && countLinks(newTradeForm.afterCharts) === 0) missing.push('After Chart image (upload a file or paste a link)');
 
@@ -1889,12 +3390,16 @@ export default function App() {
             try {
                 // multipart/form-data so new Before / After images can be uploaded while editing
                 const editData = new FormData();
-                ['date', 'pairDirection', 'session', 'fvgTap', 'smtDivergence', 'planeTarget', 'lotSizeRisk', 'outcome', 'profitAmount', 'lossAmount', 'note']
+                ['date', 'pairDirection', 'session', 'fvgTap', 'planeTarget', 'lotSizeRisk', 'outcome', 'profitAmount', 'lossAmount', 'note']
                     .forEach(k => editData.append(k, newTradeForm[k] ?? ''));
+                editData.append('smtDivergence', buildSmt(newTradeForm));
                 editData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
                 editData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
+                editData.append('setupTags', JSON.stringify(newTradeForm.setupTags || []));
+                editData.append('mistakes', JSON.stringify(newTradeForm.mistakes || []));
                 editData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
                 editData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+                editData.append('tpPrice', String(newTradeForm.tpPrice).trim() ? formatPrice5(newTradeForm.tpPrice) : '');
                 editData.append('accountId', activeDatabase === 'live' ? resolveAccountId() : '');
                 editData.append('beforeCharts', newTradeForm.beforeCharts); // optional new image URL(s)
                 editData.append('afterCharts', newTradeForm.afterCharts);
@@ -1930,9 +3435,10 @@ export default function App() {
             formData.append('pairDirection', newTradeForm.pairDirection);
             formData.append('session', newTradeForm.session);
             formData.append('fvgTap', newTradeForm.fvgTap);
-            formData.append('smtDivergence', newTradeForm.smtDivergence);
+            formData.append('smtDivergence', buildSmt(newTradeForm));
             formData.append('entryPrice', formatPrice5(newTradeForm.entryPrice));
             formData.append('slPrice', formatPrice5(newTradeForm.slPrice));
+            formData.append('tpPrice', String(newTradeForm.tpPrice).trim() ? formatPrice5(newTradeForm.tpPrice) : '');
             formData.append('planeTarget', newTradeForm.planeTarget);
             formData.append('lotSizeRisk', newTradeForm.lotSizeRisk);
             formData.append('outcome', newTradeForm.outcome);
@@ -1945,6 +3451,8 @@ export default function App() {
             // Array fields are sent as JSON strings (use JSON.parse on the backend)
             formData.append('executionRules', JSON.stringify(newTradeForm.executionRules));
             formData.append('psychologicalState', JSON.stringify(newTradeForm.psychologicalState));
+            formData.append('setupTags', JSON.stringify(newTradeForm.setupTags || []));
+            formData.append('mistakes', JSON.stringify(newTradeForm.mistakes || []));
 
             // Image files (only if selected)
             newTradeForm.beforeChartFiles.forEach(file => formData.append('beforeChart', file));
@@ -2115,8 +3623,23 @@ export default function App() {
                 rules: rulesArr,
                 rulesCount: rulesArr.length,
                 psych: psychArr,
+                setupTags: toArr(item.setupTags),
+                mistakes: toArr(item.mistakes),
+                createdAt: item.createdAt || '',
+                mt5Position: item.mt5Position || '',
+                openTime: item.openTime || '',
+                closeTime: item.closeTime || '',
+                exitPrice: num(item.exitPrice),
+                commission: num(item.commission),
+                swap: num(item.swap),
+                grossProfit: num(item.grossProfit),
+                exitReason: item.exitReason || '',
+                entryType: item.entryType || '',
+                durationMin: num(item.durationMin),
+                source: item.source || '',
                 entryPrice: num(item.entryPrice),
                 slPrice: num(item.slPrice),
+                tpPrice: num(item.tpPrice),
                 lotSize: num(item.lotSizeRisk),
                 profitAmount: num(item.profitAmount),
                 lossAmount: num(item.lossAmount),
@@ -3076,6 +4599,7 @@ export default function App() {
                     { label: 'Go to Analytics', run: () => setActiveTab('analytics') },
                     { label: 'Go to Calendar & Reports', run: () => setActiveTab('calendar') },
                     { label: 'Go to Funded Accounts', run: () => setActiveTab('accounts') },
+                    { label: 'Go to Chart Analyzer', run: () => setActiveTab('analyzer') },
                     { label: 'Switch to Forward Test data', run: () => setActiveDatabase('live') },
                     { label: 'Switch to Backtest data', run: () => setActiveDatabase('backtest') }
                 ].filter(i => !q || i.label.toLowerCase().includes(q));
@@ -3213,8 +4737,21 @@ export default function App() {
 
                     <div className="flex items-center space-x-2.5">
                         {/* 🌟 Add New Trade Button */}
+                        {activeDatabase === 'live' && (
+                            <>
+                                <button type="button" onClick={() => setIsMt5Open(true)} className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs font-bold transition active:scale-95 ${isDark ? 'border-[#8B5CF6]/40 text-[#A78BFA] hover:bg-[#8B5CF6]/10' : 'border-violet-300 text-violet-700 hover:bg-violet-50'}`}>
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" /></svg>
+                                    <span className="hidden sm:inline">Import MT5</span>
+                                </button>
+                                <button type="button" onClick={() => setIsPendingOpen(true)} aria-label={`Trades that need details: ${pendingCount}`} title="Trades that still need details" className={`relative w-9 h-9 rounded-xl border flex items-center justify-center transition active:scale-95 ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}`}>
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
+                                    {pendingCount > 0 && <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-black flex items-center justify-center">{pendingCount > 99 ? '99+' : pendingCount}</span>}
+                                </button>
+                            </>
+                        )}
+                        
                         <button
-                            onClick={() => setIsAddModalOpen(true)}
+                            onClick={requestAddTrade}
                             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow-sm active:scale-95"
                         >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3273,15 +4810,6 @@ export default function App() {
                             )}
                         </button>
 
-                        <button
-                            onClick={() => fetchTrades(false)}
-                            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition-all duration-200 flex items-center gap-2 text-xs shadow-md shadow-indigo-500/20 active:scale-95"
-                        >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                            <span className="hidden sm:inline">Refresh</span>
-                        </button>
                     </div>
                 </div>
                 <nav className="w-full flex items-center gap-1 mt-3 -mb-3 overflow-x-auto" aria-label="Dashboard sections">
@@ -3289,8 +4817,10 @@ export default function App() {
                         { id: 'overview', label: 'Overview' },
                         { id: 'analytics', label: 'Analytics' },
                         { id: 'calendar', label: 'Calendar & Reports' },
-                            { id: 'accounts', label: 'Accounts' }
-                    ].map(tab => (
+                            { id: 'accounts', label: 'Accounts' },
+                        { id: 'analyzer', label: 'Chart Analyzer' },
+                        { id: 'lab', label: 'Edge Lab' }
+                    ].filter(tab => tab.id !== 'lab' || activeDatabase === 'live').map(tab => (
                         <button
                             key={tab.id}
                             onClick={() => setActiveTab(tab.id)}
@@ -3331,6 +4861,10 @@ export default function App() {
                 <PageToolbar tab={activeTab} isLive={activeDatabase === 'live'} accounts={accounts} activeId={activeAccountId} setActiveId={setActiveAccountId} trades={trades} legacyCount={legacyCount} onManage={() => setActiveTab('accounts')} />
 
                 {activeTab === 'overview' && activeDatabase === 'live' && <AccountGuard account={accounts.find(a => a.id === activeAccountId) || accounts[0]} trades={trades} />}
+
+                {activeTab === 'lab' && activeDatabase === 'live' && <EdgeLab key={activeAcc ? activeAcc.id : 'all'} isDark={isDark} trades={trades} risk={risk} acc={activeAcc} accounts={accounts} />}
+
+                {activeTab === 'analyzer' && <ChartAnalyzer apiBase={API_BASE} onUseInJournal={openTradeFromAnalysis} />}
 
                 {activeTab === 'accounts' && (
                     <AccountsPanel accounts={accounts} onSave={saveAccount} onDelete={deleteAccount} onSelect={setActiveAccountId} activeId={activeAccountId} trades={trades} isLive={activeDatabase === 'live'} />
@@ -3793,19 +5327,27 @@ export default function App() {
                             const hasTrades = dayTrades.length > 0;
                             const dayTotalPnL = dayTrades.reduce((acc, t) => acc + t.pnl, 0);
                             const isProfitable = hasTrades && dayTotalPnL >= 0;
+                            // trades imported from MT5 that still need session / SMT / rules... (same rule as the bell icon)
+                            const needCount = activeDatabase === 'live' ? dayTrades.filter(t => t.source === 'mt5' && missingDetails(t).length > 0).length : 0;
 
                             return (
                                 <div
                                     key={`day-${dayNum}`}
                                     onClick={() => handleCalendarDateClick(dateKey)}
-                                    className={`h-24 p-3 rounded-2xl border flex flex-col justify-between transition-all duration-200 ${hasTrades
+                                    className={`relative h-24 p-3 rounded-2xl border flex flex-col justify-between transition-all duration-200 ${hasTrades
                                             ? isProfitable
                                                 ? 'bg-emerald-500/10 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.1)] cursor-pointer transform hover:scale-[1.02]'
                                                 : 'bg-rose-500/10 border-rose-500/30 hover:border-rose-400 shadow-[0_0_15px_rgba(239,68,68,0.1)] cursor-pointer transform hover:scale-[1.02]'
                                             : isDark ? 'bg-[#141B30]/70 border-[#232C45] text-slate-500' : 'bg-slate-50 border-slate-200 text-slate-400'
                                         }`}
-                                    title={hasTrades ? "Click to view trades for this date" : ""}
+                                    title={needCount > 0 ? `${needCount} trade${needCount === 1 ? '' : 's'} need details (session, SMT, rules...). Click to open.` : hasTrades ? "Click to view trades for this date" : ""}
                                 >
+                                    {needCount > 0 && (
+                                        <span aria-label={`${needCount} trades need details`} className="absolute -top-2 left-2.5 h-4 min-w-[16px] px-1 rounded-full bg-amber-500 text-[#0E1426] flex items-center justify-center gap-0.5 shadow-[0_0_10px_rgba(245,158,11,0.55)] ring-2 ring-[#070B16]">
+                                            <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.01" /></svg>
+                                            {needCount > 1 && <span className="text-[9px] font-black leading-none">{needCount}</span>}
+                                        </span>
+                                    )}
                                     <div className="flex items-center justify-between">
                                         <span className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{dayNum}</span>
                                         {hasTrades && (
@@ -3850,6 +5392,7 @@ export default function App() {
                         </div>
 
                         <form onSubmit={handleSaveNewTrade} noValidate className="space-y-4 text-xs">
+                            {activeDatabase === 'live' && !editingPageId && <RevengeBanner info={revengeInfo(trades, 30)} />}
                             {activeDatabase === 'live' && (
                                 <div>
                                     <label className="block font-bold mb-1 text-slate-400">ACCOUNT <span className="text-rose-400">*</span></label>
@@ -3888,6 +5431,10 @@ export default function App() {
                                         <option value="GBP/USD - BUY">GBP/USD - BUY</option>
                                         <option value="EUR/USD - SELL">EUR/USD - SELL</option>
                                         <option value="EUR/USD - BUY">EUR/USD - BUY</option>
+                                        {/* an older trade on another pair (e.g. XAU/USD) can still be opened for editing */}
+                                        {newTradeForm.pairDirection && !['GBP/USD - SELL', 'GBP/USD - BUY', 'EUR/USD - SELL', 'EUR/USD - BUY'].includes(newTradeForm.pairDirection) && (
+                                            <option value={newTradeForm.pairDirection}>{newTradeForm.pairDirection} (old trade)</option>
+                                        )}
                                     </select>
                                 </div>
                             </div>
@@ -3931,21 +5478,57 @@ export default function App() {
                                 </div>
                             </div>
 
-                            <div>
-                                <label className="block font-bold mb-1 text-slate-400">SMT DIVERGENCE <span className="text-rose-400">*</span></label>
-                                <select 
-                                    value={newTradeForm.smtDivergence} 
-                                    onChange={(e) => setNewTradeForm({...newTradeForm, smtDivergence: e.target.value})}
-                                    className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
-                                >
-                                    <option value="" disabled>Select SMT divergence...</option>
+                            {(() => {
+                                const tp = tradePairKey(newTradeForm.pairDirection);
+                                const auto = autoSmtPair(tp);
+                                const dxy = isDxy(newTradeForm.smtPair);
+                                const types = smtTypesFor(newTradeForm.smtPair);
+                                const shownPair = dxy ? 'DXY' : (auto || newTradeForm.smtPair);
+                                const typeInfo = types.find(o => o.value === newTradeForm.smtType);
+                                const sel = isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-white border-slate-200';
+                                const changePair = (v) => { // keep the same position in the type list when the pair changes
+                                    const from = smtTypesFor(newTradeForm.smtPair), to = smtTypesFor(v);
+                                    const idx = from.findIndex(o => o.value === newTradeForm.smtType);
+                                    setNewTradeForm({ ...newTradeForm, smtPair: v, smtType: idx >= 0 ? to[idx].value : newTradeForm.smtType });
+                                };
+                                return (
+                            <div className={`p-3 rounded-xl border space-y-3 ${isDark ? 'bg-[#141B30]/60 border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
+                                <div>
+                                    <label className="block font-bold mb-1 text-slate-400">SMT COMPARED WITH</label>
+                                    {tp && !auto ? (
+                                        <select value={newTradeForm.smtPair} onChange={(e) => changePair(e.target.value)} className={`w-full p-2.5 rounded-xl border font-bold ${sel}`}>
+                                            <option value="" disabled>Select SMT pair (old pair)...</option>
+                                            {SMT_PAIRS.filter(p => p !== tp).map(p => <option key={p} value={p}>{prettyPair(p)}</option>)}
+                                            <option value="DXY">DXY</option>
+                                        </select>
+                                    ) : (
+                                        <select value={dxy ? 'DXY' : 'AUTO'} onChange={(e) => changePair(e.target.value === 'DXY' ? 'DXY' : '')} className={`w-full p-2.5 rounded-xl border font-bold ${sel}`}>
+                                            <option value="AUTO">{auto ? prettyPair(auto) : 'Select PAIR & DIRECTION first'}</option>
+                                            <option value="DXY">DXY</option>
+                                        </select>
+                                    )}
+                                </div>
+                                <div>
+                                    <label className="block font-bold mb-1 text-slate-400">SMT DIVERGENCE <span className="text-rose-400">*</span></label>
+                                    <select
+                                        value={newTradeForm.smtType}
+                                        onChange={(e) => setNewTradeForm({ ...newTradeForm, smtType: e.target.value })}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${sel}`}
+                                    >
+                                        <option value="" disabled>Select SMT divergence...</option>
                                         <option value="NO SMT">NO SMT</option>
-                                    <option value="YES (GU HH & EU LH)">YES (GU HH & EU LH)</option>
-                                    <option value="YES (GU LH & EU HH)">YES (GU LH & EU HH)</option>
-                                    <option value="YES (GU HL & EU LL)">YES (GU HL & EU LL)</option>
-                                    <option value="YES (GU LL & EU HL)">YES (GU LL & EU HL)</option>
-                                </select>
+                                        {types.map(o => <option key={o.value} value={o.value}>{o.value}</option>)}
+                                    </select>
+                                    {typeInfo && <p className="text-[11px] text-slate-400 mt-1">{typeInfo.hint}</p>}
+                                </div>
+                                {typeInfo && shownPair && (
+                                    <SmtSummary isDark={isDark} tradePair={tp} type={newTradeForm.smtType} smtPair={shownPair} />
+                                )}
+                                {newTradeForm.smtType && newTradeForm.smtType !== 'NO SMT' && !typeInfo && <p className="text-[11px] text-amber-400">Select the divergence type again for the chosen pair.</p>}
+                                {newTradeForm.smtType === 'NO SMT' && <p className="text-[11px] text-slate-400">No divergence between pairs on this trade.</p>}
                             </div>
+                                );
+                            })()}
 
                             {/* Execution Rules Checkboxes (Setup Score is calculated automatically) */}
                             <div>
@@ -4015,7 +5598,19 @@ export default function App() {
 
                             <div className="grid grid-cols-3 gap-3">
                                 <div>
-                                    <label className="block font-bold mb-1 text-slate-400">PLANE TARGET <span className="text-slate-500 font-semibold">(auto 1:2)</span></label>
+                                    <label className="block font-bold mb-1 text-slate-400">TP PRICE <span className="text-rose-400">*</span></label>
+                                    <input 
+                                        type="number" 
+                                        step="0.00001"
+                                        placeholder="TP price"
+                                        value={newTradeForm.tpPrice} 
+                                        onChange={(e) => setNewTradeForm({...newTradeForm, tpPrice: e.target.value})}
+                                        onBlur={() => setNewTradeForm(prev => ({ ...prev, tpPrice: formatPrice5(prev.tpPrice) }))}
+                                        className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
+                                    />
+                                </div>
+                                <div className="col-span-2">
+                                    <label className="block font-bold mb-1 text-slate-400">RR & TARGET <span className="text-slate-500 font-semibold">({String(newTradeForm.tpPrice).trim() ? 'auto from Entry, SL & TP' : 'enter the TP price to calculate it'})</span></label>
                                     <input 
                                         type="text" 
                                         placeholder="1:2 (0p : 0p)"
@@ -4023,7 +5618,16 @@ export default function App() {
                                         onChange={(e) => setNewTradeForm({...newTradeForm, planeTarget: e.target.value})}
                                         className={`w-full p-2.5 rounded-xl border font-bold ${isDark ? 'bg-[#141B30] border-[#232C45] text-white' : 'bg-slate-50 border-slate-200'}`}
                                     />
+                                    {(() => {
+                                        const en = parseFloat(newTradeForm.entryPrice), sl = parseFloat(newTradeForm.slPrice), tp = parseFloat(newTradeForm.tpPrice);
+                                        if (![en, sl, tp].every(Number.isFinite)) return null;
+                                        const bad = (sl < en && tp <= en) || (sl > en && tp >= en) || sl === en;
+                                        return bad ? <p className="text-[11px] text-amber-400 mt-1">Check the prices: for a BUY the SL is below Entry and TP above it; for a SELL it is the opposite.</p> : null;
+                                    })()}
                                 </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
                                 <div className={`transition-all duration-500 ${newTradeForm.outcome === 'Loss' ? 'opacity-35 blur-[2px] pointer-events-none select-none' : ''}`} aria-disabled={newTradeForm.outcome === 'Loss'}>
                                     <label className="block font-bold mb-1 text-slate-400">PROFIT AMOUNT ($)</label>
                                     <input 
@@ -4072,6 +5676,13 @@ export default function App() {
                                     ))}
                                 </div>
                             </div>
+
+                            {activeDatabase === 'live' && (
+                                <div className="space-y-4">
+                                    <TagPicker isDark={isDark} label="SETUP TYPE" hint="Which setup was this? You can pick more than one. The Edge Lab shows the win rate of each." options={SETUP_PRESETS} value={newTradeForm.setupTags || []} onChange={(v) => setNewTradeForm({ ...newTradeForm, setupTags: v })} />
+                                    <TagPicker isDark={isDark} tone="bad" label="MISTAKES (only if something went wrong)" hint="Pick the reason so the Mistake tracker can show what costs you the most." options={MISTAKE_PRESETS} value={newTradeForm.mistakes || []} onChange={(v) => setNewTradeForm({ ...newTradeForm, mistakes: v })} />
+                                </div>
+                            )}
 
                             <>
                             {/* Multi-Image URLs for Before & After Charts */}
@@ -4245,7 +5856,7 @@ export default function App() {
                                                 className={`transition cursor-pointer ${isDark ? 'hover:bg-[#19223A]' : 'hover:bg-blue-50/50'}`}
                                                 title="Click anywhere on this row to view full trade details & charts"
                                             >
-                                                <td className={`py-3.5 px-4 font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{trade.pair}</td>
+                                                <td className={`py-3.5 px-4 font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{trade.pair}{activeDatabase === 'live' && trade.source === 'mt5' && missingDetails(trade).length > 0 && <span title={`Needs: ${missingDetails(trade).join(', ')}`} className="ml-2 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-extrabold align-middle">needs details</span>}</td>
                                                 <td className="py-3.5 px-4"><span className={`px-2.5 py-1 rounded-lg border text-[11px] ${isDark ? 'bg-[#0E1426] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>{trade.session}</span></td>
                                                 <td className="py-3.5 px-4 text-center font-bold text-amber-400 text-[11px]">{trade.setupScore}</td>
                                                 <td className={`py-3.5 px-4 font-semibold ${trade.direction === 'LONG' ? 'text-[#6366F1]' : 'text-[#A78BFA]'}`}>{trade.direction}</td>
@@ -4277,6 +5888,11 @@ export default function App() {
                     </div>
                 </div>
             )}
+
+            <ChecklistGate open={isChecklistOpen} isDark={isDark} onClose={() => setIsChecklistOpen(false)} onPass={() => { setIsChecklistOpen(false); setIsAddModalOpen(true); }} />
+
+            <Mt5ImportModal open={isMt5Open} isDark={isDark} accounts={accounts} activeAcc={activeAcc} docs={rawDocsRef.current && rawDocsRef.current.dbType === 'live' ? rawDocsRef.current.list : []} apiBase={API_BASE} onClose={() => setIsMt5Open(false)} onDone={() => { loadAccounts(); if (fetchTradesRef.current) fetchTradesRef.current(false); }} />
+            <PendingPanel open={isPendingOpen} isDark={isDark} trades={trades} onClose={() => setIsPendingOpen(false)} onEdit={(t) => { setIsPendingOpen(false); openEditTrade(t); }} />
 
             {/* AI performance report (server-side analytics + AI narrative) */}
             <AiReportModal
@@ -4362,7 +5978,7 @@ export default function App() {
                             </p>
                         </div>
 
-                        {(selectedTrade.entryPrice !== null || selectedTrade.slPrice !== null || selectedTrade.lotSize !== null || (selectedTrade.rules && selectedTrade.rules.length > 0) || (selectedTrade.psych && selectedTrade.psych.length > 0)) && (
+                        {(selectedTrade.entryPrice !== null || selectedTrade.slPrice !== null || selectedTrade.lotSize !== null || (selectedTrade.rules && selectedTrade.rules.length > 0) || (selectedTrade.psych && selectedTrade.psych.length > 0) || (selectedTrade.setupTags && selectedTrade.setupTags.length > 0) || (selectedTrade.mistakes && selectedTrade.mistakes.length > 0)) && (
                             <div className={`p-5 rounded-2xl border space-y-3 ${isDark ? 'bg-[#141B30] border-[#232C45]' : 'bg-slate-50 border-slate-200'}`}>
                                 <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-400">Execution Details</h4>
                                 <div className="grid grid-cols-3 gap-3 text-xs">
@@ -4370,9 +5986,22 @@ export default function App() {
                                     <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">SL</span><b>{selectedTrade.slPrice !== null ? formatPrice5(selectedTrade.slPrice) : '-'}</b></div>
                                     <div><span className="text-slate-400 block text-[10px] uppercase font-semibold">Lot size & risk</span><b>{selectedTrade.lotSize !== null ? selectedTrade.lotSize : '-'}</b></div>
                                 </div>
-                                {(selectedTrade.fvgTap || selectedTrade.smt) && (
-                                    <div className="text-xs text-slate-400">15m FVG tap: <b className={isDark ? 'text-slate-200' : 'text-slate-800'}>{selectedTrade.fvgTap || '-'}</b> · SMT: <b className={isDark ? 'text-slate-200' : 'text-slate-800'}>{selectedTrade.smt || '-'}</b></div>
-                                )}
+                                {(selectedTrade.fvgTap || selectedTrade.smt) && (() => {
+                                    const sp = parseSmt(selectedTrade.smt);
+                                    return (
+                                        <div className="space-y-2">
+                                            <div className="text-xs text-slate-400">15m FVG tap: <b className={isDark ? 'text-slate-200' : 'text-slate-800'}>{selectedTrade.fvgTap || '-'}</b></div>
+                                            <div className="text-[10px] uppercase font-semibold text-slate-400">SMT divergence</div>
+                                            {sp.none ? (
+                                                <div className="text-xs font-bold text-slate-400">NO SMT</div>
+                                            ) : sp.type && sp.pair ? (
+                                                <SmtSummary isDark={isDark} compact tradePair={tradePairKey(selectedTrade.pairTag || selectedTrade.pair)} type={sp.type} smtPair={sp.pair} />
+                                            ) : (
+                                                <div className="text-xs font-bold">{selectedTrade.smt || '-'}</div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
                                 {selectedTrade.rules && selectedTrade.rules.length > 0 && (
                                     <div className="flex flex-wrap gap-1.5">
                                         {selectedTrade.rules.map(r => <span key={r} className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-bold">✓ {r}</span>)}
@@ -4383,8 +6012,20 @@ export default function App() {
                                         {selectedTrade.psych.map(x => <span key={x} className="px-2.5 py-1 rounded-lg bg-[#8B5CF6]/10 text-[#A78BFA] border border-[#8B5CF6]/20 text-[10px] font-bold">{x}</span>)}
                                     </div>
                                 )}
+                                {selectedTrade.setupTags && selectedTrade.setupTags.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {selectedTrade.setupTags.map(x => <span key={x} className="px-2.5 py-1 rounded-lg bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-[10px] font-bold">Setup: {x}</span>)}
+                                    </div>
+                                )}
+                                {selectedTrade.mistakes && selectedTrade.mistakes.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {selectedTrade.mistakes.map(x => <span key={x} className="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-300 border border-rose-500/20 text-[10px] font-bold">Mistake: {x}</span>)}
+                                    </div>
+                                )}
                             </div>
                         )}
+
+                        <Mt5Details t={selectedTrade} isDark={isDark} />
 
                         {(selectedTrade.beforeCharts.length > 0 || selectedTrade.afterCharts.length > 0) && (
                             <div className="space-y-3">
@@ -4548,4 +6189,36 @@ export default function App() {
             )}
         </div>
     );
+}
+
+// Gate: asks the server whether a password is needed and shows the login page when it is
+export default function App() {
+    const [state, setState] = useState('checking'); // checking | login | locked | ok | offline
+    const check = async () => {
+        try {
+            const r = await fetch(`${API_BASE}/api/auth/status`, { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} });
+            const d = await r.json();
+            setState(d.locked ? 'locked' : d.ok ? 'ok' : 'login');
+        } catch (_) { setState('offline'); }
+    };
+    useEffect(() => {
+        check();
+        const expired = () => setState('login');
+        window.addEventListener('mintpip-auth-expired', expired);
+        return () => window.removeEventListener('mintpip-auth-expired', expired);
+    }, []);
+    if (state === 'checking') return <div style={{ minHeight: '100vh', background: '#0B1020' }} />;
+    if (state === 'offline') return (
+        <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0B1020', color: '#CBD5E1', fontFamily: 'system-ui', textAlign: 'center', padding: 16 }}>
+            <div><div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Cannot reach the server</div><button onClick={() => { setState('checking'); check(); }} style={{ padding: '8px 16px', borderRadius: 10, border: 0, background: '#6366F1', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Try again</button></div>
+        </div>
+    );
+    if (state === 'login' || state === 'locked') return <LoginScreen locked={state === 'locked'} onLoggedIn={() => setState('ok')} />;
+    return (<>
+        <MintPipApp />
+        {getToken() && (
+            <button onClick={() => { setToken(''); setState('login'); }} title="Log out"
+                style={{ position: 'fixed', left: 10, bottom: 10, zIndex: 40, padding: '5px 10px', borderRadius: 10, border: '1px solid #232C45', background: 'rgba(20,27,48,.85)', color: '#94A3B8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>Log out</button>
+        )}
+    </>);
 }

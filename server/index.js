@@ -6,9 +6,100 @@ const mongoose = require('mongoose');
 const cloudinary = require('cloudinary').v2;
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
 
+const crypto = require('crypto');
+
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+// ---------------------------------------------------------------------------
+// Security: CORS, headers, single-password login (APP_PASSWORD) and rate limits
+// ---------------------------------------------------------------------------
+// ALLOWED_ORIGINS="https://your-site.netlify.app,http://localhost:5173" restricts which websites may call the API.
+// If it is not set, every origin is allowed (the password login below still protects the data).
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+app.use(cors(ALLOWED_ORIGINS.length ? {
+  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
+} : undefined));
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Strict-Transport-Security', 'max-age=15552000');
+  next();
+});
+
+const APP_PASSWORD = String(process.env.APP_PASSWORD || '');
+const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.NETLIFY);
+const AUTH_SECRET = process.env.AUTH_SECRET || crypto.createHash('sha256').update(`mintpip|${APP_PASSWORD}|${process.env.MONGODB_URI || ''}`).digest('hex');
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // stay logged in for 30 days
+if (!APP_PASSWORD) {
+  console.warn(IS_PROD
+    ? '⚠️  APP_PASSWORD is not set: the API is LOCKED until you add it to the environment variables.'
+    : '⚠️  APP_PASSWORD is not set: login is OFF (fine on your own computer). Set it in .env before you deploy.');
+}
+
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
+const safeEqual = (a, b) => crypto.timingSafeEqual(sha(a), sha(b));
+const signToken = (exp) => `${exp}.${crypto.createHmac('sha256', AUTH_SECRET).update(String(exp)).digest('hex')}`;
+const tokenValid = (token) => {
+  const [exp, sig] = String(token || '').split('.');
+  if (!exp || !sig || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+  const good = crypto.createHmac('sha256', AUTH_SECRET).update(exp).digest('hex');
+  return sig.length === good.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good));
+};
+const bearer = (req) => String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+
+// Tiny in-memory rate limiter (per IP)
+const makeLimiter = (max, windowMs) => {
+  const hits = new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = req.ip || 'x';
+    const rec = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (rec.length >= max) {
+      const wait = Math.ceil((windowMs - (now - rec[0])) / 1000);
+      res.setHeader('Retry-After', String(wait));
+      return res.status(429).json({ success: false, error: `Too many requests. Try again in ${wait}s.` });
+    }
+    rec.push(now);
+    hits.set(key, rec);
+    if (hits.size > 500) for (const [k, arr] of hits) if (!arr.some((t) => now - t < windowMs)) hits.delete(k);
+    next();
+  };
+};
+const loginLimiter = makeLimiter(8, 15 * 60 * 1000); // 8 login attempts / 15 min / IP
+const aiLimiter = makeLimiter(20, 60 * 1000);        // 20 AI calls / minute / IP
+
+// Public: does the server need a password, and is the token still valid?
+app.get('/api/auth/status', (req, res) => {
+  res.json({ success: true, required: Boolean(APP_PASSWORD), locked: IS_PROD && !APP_PASSWORD, ok: !APP_PASSWORD ? !IS_PROD : tokenValid(bearer(req)) });
+});
+
+app.post('/api/auth/login', loginLimiter, express.json({ limit: '10kb' }), (req, res) => {
+  if (!APP_PASSWORD) return res.status(503).json({ success: false, error: 'APP_PASSWORD is not configured on the server.' });
+  const given = String((req.body && req.body.password) || '');
+  if (!given || !safeEqual(given, APP_PASSWORD)) {
+    return res.status(401).json({ success: false, error: 'Wrong password.' });
+  }
+  const exp = Date.now() + TOKEN_TTL_MS;
+  res.json({ success: true, token: signToken(exp), expiresAt: exp });
+});
+
+// Everything else under /api needs a valid token
+app.use('/api', (req, res, next) => {
+  if (!APP_PASSWORD) {
+    if (IS_PROD) return res.status(503).json({ success: false, error: 'Server locked: set APP_PASSWORD in the environment variables.' });
+    return next(); // local development without a password
+  }
+  if (req.method === 'OPTIONS') return next();
+  if (tokenValid(bearer(req))) return next();
+  res.status(401).json({ success: false, error: 'Login required.', auth: true });
+});
+app.use(['/api/ai-report', '/api/chart-analysis'], aiLimiter);
+
+app.use(express.json({ limit: '14mb' })); // chart screenshots are sent as base64
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 5000;
@@ -34,7 +125,7 @@ const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 // The app ALWAYS uses this database (default: mintpipDB), whatever the connection string says.
 // (A connection string without a database name makes MongoDB silently fall back to the "test" database.)
 const MONGODB_DB = process.env.MONGODB_DB || 'mintpipDB';
-const SERVER_BUILD = 'mintpipDB-v4-llama'; // shown in the terminal and in /api/health, so you can tell which index.js is really running
+const SERVER_BUILD = 'mintpipDB-v7-mt5-import'; // shown in the terminal and in /api/health, so you can tell which index.js is really running
 console.log(`MintPip server build ${SERVER_BUILD} (target database: "${MONGODB_DB}")`);
 const TRADES_COLLECTION = process.env.MONGODB_TRADES_COLLECTION || 'trades';
 const ACCOUNTS_COLLECTION = process.env.MONGODB_ACCOUNTS_COLLECTION || 'accounts';
@@ -85,12 +176,27 @@ const tradeSchema = new mongoose.Schema(
     executionRules: { type: [String], default: [] },
     entryPrice: { type: Number, default: null },
     slPrice: { type: Number, default: null },
+    tpPrice: { type: Number, default: null },
     planeTarget: { type: String, default: '' },
     lotSizeRisk: { type: Number, default: null },
     outcome: { type: String, default: 'Win' },
     profitAmount: { type: Number, default: null },
     lossAmount: { type: Number, default: null },
     psychologicalState: { type: [String], default: [] },
+    setupTags: { type: [String], default: [] }, // setup type, e.g. Silver Bullet, FVG tap (live trades)
+    mistakes: { type: [String], default: [] }, // what went wrong, e.g. Early entry, Moved SL (live trades)
+    // Filled by the MT5 report import (times are the broker's server time, 'YYYY-MM-DDTHH:mm:ss')
+    mt5Position: { type: String, default: '', index: true },
+    openTime: { type: String, default: '' },
+    closeTime: { type: String, default: '' },
+    exitPrice: { type: Number, default: null },
+    commission: { type: Number, default: null },
+    swap: { type: Number, default: null },
+    grossProfit: { type: Number, default: null },
+    exitReason: { type: String, default: '' }, // SL | TP | Manual | Stop out
+    entryType: { type: String, default: '' }, // Market | Limit | Stop
+    durationMin: { type: Number, default: null },
+    source: { type: String, default: '' }, // 'mt5' when the numbers came from an MT5 report
     note: { type: String, default: '' },
     screenshotUrl: { type: String, default: '' }, // first Cloudinary secure URL
     beforeCharts: { type: [String], default: [] }, // all "before" image URLs
@@ -127,6 +233,7 @@ const accountSchema = new mongoose.Schema(
     profitSplit: { type: Number, default: 80 },
     fee: { type: Number, default: 0 },
     color: { type: String, default: '#6366F1' },
+    mt5Login: { type: String, default: '' }, // MT5 account number, so a report finds its account automatically
     payouts: [{ date: String, amount: Number }],
     fees: [{ date: String, label: String, amount: Number }] // extra fees: resets, retakes, add-ons (fee = initial challenge fee)
   },
@@ -134,7 +241,7 @@ const accountSchema = new mongoose.Schema(
 );
 const Account = mongoose.models.Account || mongoose.model('Account', accountSchema, ACCOUNTS_COLLECTION);
 
-const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'weeklyLossPct', 'riskTargetPct', 'maxLossStreak', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color'];
+const ACCOUNT_KEYS = ['name', 'firm', 'type', 'phase', 'status', 'startBalance', 'startDate', 'endDate', 'dailyLossPct', 'weeklyLossPct', 'riskTargetPct', 'maxLossStreak', 'maxDDPct', 'ddType', 'targetPct', 'minDays', 'consistencyPct', 'profitSplit', 'fee', 'color', 'mt5Login'];
 const pickAccount = (b = {}) => {
   const out = {};
   ACCOUNT_KEYS.forEach((k) => { if (b[k] !== undefined) out[k] = b[k]; });
@@ -298,12 +405,15 @@ app.post('/api/trades/add', handleUpload, ensureDb, async (req, res) => {
       executionRules: parseArray(b.executionRules),
       entryPrice: parseNum(b.entryPrice, 5),
       slPrice: parseNum(b.slPrice, 5),
+      tpPrice: parseNum(b.tpPrice, 5),
       planeTarget: b.planeTarget || '',
       lotSizeRisk: parseNum(b.lotSizeRisk),
       outcome: b.outcome || 'Win',
       profitAmount: parseNum(b.profitAmount),
       lossAmount: parseNum(b.lossAmount),
       psychologicalState: parseArray(b.psychologicalState),
+      setupTags: parseArray(b.setupTags).slice(0, 10),
+      mistakes: parseArray(b.mistakes).slice(0, 10),
       note: b.note || '',
       screenshotUrl: beforeCharts[0] || afterCharts[0] || '',
       beforeCharts,
@@ -343,8 +453,11 @@ app.patch('/api/trades/:id', handleUpload, ensureDb, async (req, res) => {
     if (b.date) update.date = normalizeDate(b.date);
     if (b.executionRules !== undefined) update.executionRules = parseArray(b.executionRules);
     if (b.psychologicalState !== undefined) update.psychologicalState = parseArray(b.psychologicalState);
+    if (b.setupTags !== undefined) update.setupTags = parseArray(b.setupTags).slice(0, 10);
+    if (b.mistakes !== undefined) update.mistakes = parseArray(b.mistakes).slice(0, 10);
     if (b.entryPrice !== undefined) update.entryPrice = parseNum(b.entryPrice, 5);
     if (b.slPrice !== undefined) update.slPrice = parseNum(b.slPrice, 5);
+    if (b.tpPrice !== undefined) update.tpPrice = parseNum(b.tpPrice, 5);
     if (b.lotSizeRisk !== undefined) update.lotSizeRisk = parseNum(b.lotSizeRisk);
     if (b.profitAmount !== undefined) update.profitAmount = parseNum(b.profitAmount);
     if (b.lossAmount !== undefined) update.lossAmount = parseNum(b.lossAmount);
@@ -408,6 +521,67 @@ app.delete('/api/trades/:id', ensureDb, async (req, res) => {
     res.json({ success: true, id });
   } catch (error) {
     console.error('Delete Trade Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// MT5 report import: the browser reads the report and sends the trades it wants updated / added
+// ---------------------------------------------------------------------------
+const MT5_NUM = ['entryPrice', 'slPrice', 'tpPrice', 'lotSizeRisk', 'exitPrice', 'commission', 'swap', 'grossProfit', 'durationMin'];
+const MT5_NULLABLE = ['profitAmount', 'lossAmount'];
+const MT5_STR = ['planeTarget', 'outcome', 'openTime', 'closeTime', 'exitReason', 'entryType', 'mt5Position'];
+const mt5Fields = (t = {}) => {
+  const f = {};
+  MT5_NUM.forEach((k) => { if (t[k] !== undefined && t[k] !== null && t[k] !== '' && Number.isFinite(Number(t[k]))) f[k] = Number(t[k]); });
+  MT5_NULLABLE.forEach((k) => { if (t[k] === null) f[k] = null; else if (t[k] !== undefined && Number.isFinite(Number(t[k]))) f[k] = Number(t[k]); });
+  MT5_STR.forEach((k) => { if (t[k] !== undefined && t[k] !== null) f[k] = String(t[k]).slice(0, 80); });
+  f.source = 'mt5';
+  return f;
+};
+app.post('/api/trades/import-mt5', ensureDb, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const accountId = String(b.accountId || '').trim();
+    if (!isValidId(accountId)) return res.status(400).json({ success: false, error: 'Choose the account this report belongs to.' });
+    const account = await Account.findById(accountId).lean();
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found.' });
+    const items = Array.isArray(b.items) ? b.items.slice(0, 500) : [];
+    const out = { success: true, created: 0, updated: 0, skipped: 0, errors: [] };
+    for (const it of items) {
+      const t = (it && it.trade) || {};
+      const label = `${t.mt5Position || it.tradeId || 'trade'}`;
+      try {
+        const fields = mt5Fields(t);
+        if (it.action === 'update' && isValidId(it.tradeId)) {
+          const doc = await Trade.findOne({ _id: it.tradeId, databaseType: 'live' });
+          if (!doc) { out.errors.push(`${label}: the logged trade no longer exists.`); continue; }
+          if (doc.accountId && doc.accountId !== accountId) { out.errors.push(`${label}: that trade belongs to another account.`); continue; }
+          doc.set({ ...fields, accountId });
+          await doc.save();
+          out.updated++;
+        } else if (it.action === 'create') {
+          const position = fields.mt5Position || '';
+          if (position) {
+            const dup = await Trade.findOne({ accountId, mt5Position: position, databaseType: 'live' });
+            if (dup) { dup.set(fields); await dup.save(); out.updated++; continue; }
+          }
+          const pd = String(t.pairDirection || '').trim().slice(0, 40);
+          if (!pd) { out.errors.push(`${label}: pair and direction are missing.`); continue; }
+          await Trade.create({ databaseType: 'live', accountId, date: normalizeDate(t.date), pairDirection: pd, ...fields });
+          out.created++;
+        } else {
+          out.skipped++;
+        }
+      } catch (e) {
+        out.errors.push(`${label}: ${e.message}`);
+      }
+    }
+    if (b.mt5Login && !account.mt5Login) await Account.updateOne({ _id: accountId }, { $set: { mt5Login: String(b.mt5Login).slice(0, 40) } });
+    console.log(`MT5 import -> account ${accountId}: ${out.created} added, ${out.updated} updated, ${out.skipped} skipped, ${out.errors.length} errors`);
+    res.json(out);
+  } catch (error) {
+    console.error('MT5 import error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1168,6 +1342,250 @@ return registerAiReportRoute;
 })();
 
 registerAiReportRoute(app);
+
+// ---------------------------------------------------------------------------
+// ICT chart analyzer: a vision AI reads a chart screenshot (OpenRouter, free models by default).
+// The key stays on the server. The AI only gives a structured second opinion, never signals.
+// .env (optional): OPENROUTER_VISION_MODEL=<model id>  OPENROUTER_VISION_MODELS=id1,id2
+// ---------------------------------------------------------------------------
+const ICT_RULES = ['1min MSS & FVG Entry', 'SMT Divergence', 'HTF Context (15min FVG)', 'Time Filter', 'Daily Bias Alignment'];
+const VISION_MODELS = [...new Set([process.env.OPENROUTER_VISION_MODEL, ...String(process.env.OPENROUTER_VISION_MODELS || '').split(','), 'openrouter/free'].map((m) => (m || '').trim()).filter(Boolean))];
+// Google Gemini (free tier from https://aistudio.google.com/apikey) is the most reliable FREE vision option.
+// .env: GEMINI_API_KEY=...   (optional) GEMINI_MODEL=gemini-2.5-flash  or a comma separated list
+const GEMINI_MODELS = [...new Set(String(process.env.GEMINI_MODEL || 'gemini-2.5-flash,gemini-2.0-flash').split(',').map((m) => m.trim()).filter(Boolean))];
+const geminiKey = () => (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+
+async function callGemini(model, apiKey, promptText, images, signal) {
+  const parts = [{ text: promptText }];
+  images.forEach((i) => {
+    const m = /^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/i.exec(String(i.dataUrl || ''));
+    if (m) parts.push({ inline_data: { mime_type: m[1].toLowerCase().replace('jpg', 'jpeg'), data: m[2] } });
+  });
+  const generationConfig = { temperature: 0.2, maxOutputTokens: 6000, responseMimeType: 'application/json' };
+  if (/2\.5/.test(model)) generationConfig.thinkingConfig = { thinkingBudget: 0 }; // no hidden "thinking" tokens: faster, cheaper, answer never cut short
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig })
+  });
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 110) : '';
+    const err = new Error(`HTTP ${r.status}${msg ? ` (${msg})` : ''}`);
+    err.status = r.status;
+    throw err;
+  }
+  const cand = data && data.candidates && data.candidates[0];
+  const text = cand && cand.content && Array.isArray(cand.content.parts) ? cand.content.parts.map((p) => p.text || '').join('') : '';
+  if (!text) { const e = new Error(`empty answer${cand && cand.finishReason ? ` (finish=${cand.finishReason})` : data && data.promptFeedback ? ' (blocked)' : ''}`); e.status = 0; throw e; }
+  return text;
+}
+
+const chartHits = new Map();
+const chartAllowed = (ip) => {
+  const now = Date.now();
+  if (chartHits.size > 500) chartHits.clear();
+  const list = (chartHits.get(ip) || []).filter((t) => now - t < 10 * 60 * 1000);
+  if (list.length >= 12) { chartHits.set(ip, list); return false; }
+  list.push(now); chartHits.set(ip, list);
+  return true;
+};
+const ctext = (v, n = 300) => String(v == null ? '' : v).replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, n);
+const oneOf = (v, list, d) => { const s = String(v || '').toLowerCase().trim(); return list.includes(s) ? s : d; };
+const carr = (v) => (Array.isArray(v) ? v : []);
+const keyOf = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function extractJson(text) {
+  let t = String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?/gi, '');
+  const a = t.indexOf('{');
+  if (a < 0) return null;
+  t = t.slice(a);
+  const b = t.lastIndexOf('}');
+  if (b > 0) { try { return JSON.parse(t.slice(0, b + 1)); } catch (e) { /* maybe truncated: repair below */ } }
+  // Repair an answer that was cut off (token limit): drop the unfinished tail and close open brackets
+  let cut = t;
+  for (let i = 0; i < 40 && cut.length > 2; i++) {
+    const stack = []; let inStr = false, esc = false;
+    for (const ch of cut) {
+      if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true; else if (ch === '{' || ch === '[') stack.push(ch); else if (ch === '}' || ch === ']') stack.pop();
+    }
+    const tail = (inStr ? '"' : '') + stack.reverse().map((c) => (c === '{' ? '}' : ']')).join('');
+    const candidate = cut.replace(/[,:\s]+$/, '') + tail;
+    try { return JSON.parse(candidate); } catch (e) { /* trim a bit more */ }
+    const cp = Math.max(cut.lastIndexOf(','), cut.lastIndexOf('}'), cut.lastIndexOf(']'));
+    if (cp <= 0) break;
+    cut = cut.slice(0, cp + (cut[cp] === ',' ? 0 : 1));
+  }
+  return null;
+}
+
+function normalizeAnalysis(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (!raw.summary && !raw.bias && !raw.checklist) return null;
+  const checklist = ICT_RULES.map((rule) => {
+    const hit = carr(raw.checklist).find((c) => c && (keyOf(c.rule) === keyOf(rule) || keyOf(c.rule).includes(keyOf(rule).slice(0, 8))));
+    return { rule, status: oneOf(hit && hit.status, ['met', 'not_met', 'unclear'], 'unclear'), evidence: ctext(hit && hit.evidence, 220) };
+  });
+  const ti = raw.tradeIdea && typeof raw.tradeIdea === 'object' ? raw.tradeIdea : {};
+  const items = (v, max, shape) => carr(v).slice(0, max).filter((x) => x && typeof x === 'object').map(shape);
+  return {
+    chartReadable: raw.chartReadable !== false,
+    readabilityNote: ctext(raw.readabilityNote, 240),
+    symbolSeen: ctext(raw.symbolSeen, 30),
+    timeframeSeen: ctext(raw.timeframeSeen, 20),
+    bias: oneOf(raw.bias, ['bullish', 'bearish', 'neutral'], 'neutral'),
+    confidence: Math.max(0, Math.min(100, Math.round(Number(raw.confidence) || 0))),
+    summary: ctext(raw.summary, 600),
+    structure: items(raw.structure, 4, (x) => ({ label: ctext(x.label, 60), detail: ctext(x.detail, 260) })),
+    liquidity: items(raw.liquidity, 4, (x) => ({ label: ctext(x.label, 60), detail: ctext(x.detail, 260), side: oneOf(x.side, ['buy-side', 'sell-side'], '') })),
+    pdArrays: items(raw.pdArrays, 4, (x) => ({ type: ctext(x.type, 20), direction: oneOf(x.direction, ['bullish', 'bearish'], ''), zone: ctext(x.zone, 60), note: ctext(x.note, 220) })),
+    premiumDiscount: oneOf(raw.premiumDiscount, ['premium', 'discount', 'equilibrium', 'unclear'], 'unclear'),
+    timeContext: ctext(raw.timeContext, 260),
+    tradeIdea: {
+      direction: oneOf(ti.direction, ['buy', 'sell', 'none'], 'none'),
+      entryZone: ctext(ti.entryZone, 80), stopLoss: ctext(ti.stopLoss, 80), takeProfit: ctext(ti.takeProfit, 80), rr: ctext(ti.rr, 30),
+      invalidation: ctext(ti.invalidation, 220), reasoning: ctext(ti.reasoning, 400)
+    },
+    checklist,
+    setupScore: Math.round((checklist.filter((c) => c.status === 'met').length / ICT_RULES.length) * 100),
+    markupReview: { agrees: oneOf(raw.markupReview && raw.markupReview.agrees, ['yes', 'partly', 'no', 'n/a'], 'n/a'), notes: ctext(raw.markupReview && raw.markupReview.notes, 500) },
+    warnings: carr(raw.warnings).map((w) => ctext(w, 200)).filter(Boolean).slice(0, 5)
+  };
+}
+
+function buildChartPrompt(b, imageCount) {
+  const marked = b.chartMode === 'marked';
+  const modeText = marked
+    ? 'CHART MODE: the trader has ALREADY drawn their own analysis on this chart (lines, boxes, labels, arrows). Treat those marks as the trader\'s OPINION, not as facts. First describe what they marked, then check it against the visible price action and say clearly where you agree and where you disagree. Do not just repeat their marks.'
+    : 'CHART MODE: clean chart, no analysis drawn yet. Analyse it from scratch.';
+  const line = (k, v) => (v ? `- ${k}: ${ctext(v, 120)}\n` : '');
+  return `You are an ICT (Inner Circle Trader) / Smart Money Concepts chart analyst giving a careful second opinion on a screenshot.
+
+IMAGES: image 1 is the MAIN chart (entry timeframe).${imageCount > 1 ? ' Image 2 is the HIGHER-TIMEFRAME chart for context.' : ''}
+
+${modeText}
+
+TRADER CONTEXT:
+${line('Pair', b.pair)}${line('Timeframe', b.timeframe)}${line('Session', b.session)}${line("Trader's own bias", b.userBias)}${line('Planned entry', b.entry)}${line('Planned stop loss', b.sl)}${line('Planned take profit', b.tp)}${line('Notes', ctext(b.notes, 400))}
+STRICT RULES:
+1. Read price levels ONLY if they are clearly readable on the price axis. Otherwise write "unclear". Never invent prices, candles or patterns.
+2. If it is not a candlestick/price chart, set chartReadable=false and explain in readabilityNote.
+3. Describe structure (swings, BOS/MSS, displacement), liquidity (equal highs/lows, sweeps), PD arrays (FVG, order blocks, breakers) and premium/discount only when visible.
+4. If the evidence is weak or the chart is cluttered, say so, lower the confidence and prefer "neutral" / "unclear".
+5. Use the trader's planned entry/SL/TP when given; do not replace them with invented levels.
+6. Grade each execution rule as met, not_met or unclear using only what is visible. Rules: ${ICT_RULES.join(' | ')}.
+7. Keep every text short and practical. English only.
+
+Reply with ONE JSON object and nothing else (no markdown), exactly in this shape:
+{"chartReadable":true,"readabilityNote":"","symbolSeen":"","timeframeSeen":"","bias":"bullish|bearish|neutral","confidence":0,"summary":"2-3 sentences","structure":[{"label":"","detail":""}],"liquidity":[{"label":"","detail":"","side":"buy-side|sell-side"}],"pdArrays":[{"type":"FVG|OB|BPR|Breaker|IFVG","direction":"bullish|bearish","zone":"","note":""}],"premiumDiscount":"premium|discount|equilibrium|unclear","timeContext":"","tradeIdea":{"direction":"buy|sell|none","entryZone":"","stopLoss":"","takeProfit":"","rr":"","invalidation":"","reasoning":""},"checklist":[{"rule":"","status":"met|not_met|unclear","evidence":""}],"markupReview":{"agrees":"yes|partly|no|n/a","notes":"only when the trader marked the chart: where the marks agree or disagree with price action"},"warnings":[""]}`;
+}
+
+// Open http://localhost:5000/api/chart-analysis in a browser to check that this route exists on the running server
+app.get('/api/chart-analysis', (req, res) => {
+  res.json({
+    success: true,
+    ready: true,
+    build: SERVER_BUILD,
+    keyConfigured: Boolean(process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY),
+    geminiConfigured: Boolean(geminiKey()),
+    geminiModels: geminiKey() ? GEMINI_MODELS : [],
+    models: VISION_MODELS
+  });
+});
+
+app.post('/api/chart-analysis', async (req, res) => {
+  const started = Date.now();
+  try {
+    if (!chartAllowed(req.ip || 'unknown')) {
+      return res.status(429).json({ success: false, error: 'Too many analyses in a short time. Please wait a few minutes.' });
+    }
+    const apiKey = (process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY || '').trim();
+    const gKey = geminiKey();
+    if (!apiKey && !gKey) return res.status(500).json({ success: false, error: 'No AI key found. Add GEMINI_API_KEY (free, from aistudio.google.com/apikey) to the .env file next to your server folder and restart the server.' });
+
+    const b = req.body || {};
+    const images = carr(b.images).slice(0, 2).filter((i) => i && /^data:image\/(png|jpe?g|webp);base64,/i.test(String(i.dataUrl || '')) && String(i.dataUrl).length < 7000000);
+    if (!images.length) return res.status(400).json({ success: false, error: 'Please add a chart screenshot (PNG, JPG or WEBP, under about 5 MB).' });
+
+    const content = [{ type: 'text', text: buildChartPrompt(b, images.length) }, ...images.map((i) => ({ type: 'image_url', image_url: { url: i.dataUrl } }))];
+    // The free router picks a random free vision model per call, so a single router id is simply tried up to 3 times.
+    const attempts = VISION_MODELS.length === 1 ? [VISION_MODELS[0], VISION_MODELS[0], VISION_MODELS[0], VISION_MODELS[0]] : VISION_MODELS;
+    const errors = [];
+
+    // 1) Google Gemini (free tier) first when a key is configured
+    if (gKey) {
+      const promptText = buildChartPrompt(b, images.length);
+      for (const gm of GEMINI_MODELS) {
+        const left = 150000 - (Date.now() - started);
+        if (left < 6000) { errors.push('time budget used up'); break; }
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), Math.min(left, 60000));
+        try {
+          const text = await callGemini(gm, gKey, promptText, images, ctrl.signal);
+          const analysis = normalizeAnalysis(extractJson(text));
+          if (!analysis) { errors.push(`${gm}: unreadable answer`); console.warn(`[chart-analysis] ${gm} unreadable:`, text.slice(0, 300).replace(/\s+/g, ' ')); continue; }
+          analysis.chartMode = b.chartMode === 'marked' ? 'marked' : 'clean';
+          return res.json({ success: true, analysis, model: gm, ms: Date.now() - started });
+        } catch (e) {
+          errors.push(`${gm}: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
+          if (e.status === 400 && /API key/i.test(e.message)) return res.status(502).json({ success: false, error: 'Google rejected the GEMINI_API_KEY. Create a new key at aistudio.google.com/apikey and put it in the .env file.' });
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
+    // 2) OpenRouter fallback (free models are unreliable)
+    if (!apiKey) {
+      console.warn('[chart-analysis] failed:', errors.join(' | '));
+      return res.status(502).json({ success: false, error: `Gemini could not analyse this chart (${errors.join('; ').slice(0, 260)}). The free quota may be used up for now, please try again in a minute.` });
+    }
+    for (const model of attempts) {
+      const left = 150000 - (Date.now() - started);
+      if (left < 6000) { errors.push('time budget used up'); break; }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), Math.min(left, 45000));
+      try {
+        const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': process.env.APP_URL || 'http://localhost:5173', 'X-Title': 'MintPip Chart Analyzer' },
+          body: JSON.stringify({ model, messages: [{ role: 'user', content }], temperature: 0.2, max_tokens: 4500 })
+        });
+        const data = await r.json().catch(() => null);
+        if (!r.ok) {
+          const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 90) : '';
+          errors.push(`${model}: HTTP ${r.status}${msg ? ` (${msg})` : ''}`);
+          if (r.status === 401) return res.status(502).json({ success: false, error: 'OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY.' });
+          if (r.status === 402) return res.status(502).json({ success: false, error: 'OpenRouter says there are not enough credits for this model (402).' });
+          continue;
+        }
+        const choice = data && data.choices && data.choices[0];
+        const msg = (choice && choice.message) || {};
+        // Reasoning models may leave "content" empty and put the answer in "reasoning"; try both
+        const text = [msg.content, msg.reasoning].map((x) => (typeof x === 'string' ? x : Array.isArray(x) ? x.map((p) => (p && p.text) || '').join('') : '')).find((x) => x && x.includes('{')) || '';
+        const analysis = normalizeAnalysis(extractJson(text));
+        if (!analysis) {
+          const why = !choice ? 'no answer' : `finish=${choice.finish_reason || '?'}, ${String(msg.content || '').length} chars`;
+          console.warn(`[chart-analysis] ${(data && data.model) || model} unreadable (${why}):`, String(msg.content || msg.reasoning || '').slice(0, 300).replace(/\s+/g, ' '));
+          errors.push(`${(data && data.model) || model}: unreadable answer (${why})`);
+          continue;
+        }
+        analysis.chartMode = b.chartMode === 'marked' ? 'marked' : 'clean';
+        return res.json({ success: true, analysis, model: (data && data.model) || model, ms: Date.now() - started });
+      } catch (e) {
+        errors.push(`${model}: ${e.name === 'AbortError' ? 'timed out' : e.message}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    console.warn('[chart-analysis] failed:', errors.join(' | '));
+    res.status(502).json({ success: false, error: `The AI could not analyse this chart right now (${errors.join('; ').slice(0, 260)}). Free models are busy at times, please try again in a minute.` });
+  } catch (error) {
+    console.error('Chart analysis error:', error.message);
+    res.status(500).json({ success: false, error: 'Chart analysis failed. Please try again.' });
+  }
+});
 
 // Netlify function fallback redirect
 app.get('/.netlify/functions/trades', (req, res) => {

@@ -5712,7 +5712,7 @@ function MintPipApp() {
                             {/* Direct image file uploads from computer (multiple images allowed) */}
                             <div className="grid grid-cols-2 gap-4">
                                 {[
-                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#7C3AED]' },
+                                    { id: 'before', label: 'BEFORE CHART (Upload Images)', field: 'beforeChartFiles', btn: 'file:bg-[#2391FF]' },
                                     { id: 'after', label: 'AFTER CHART (Upload Images)', field: 'afterChartFiles', btn: 'file:bg-[#7C3AED]' }
                                 ].map(({ id, label, field, btn }) => (
                                     <div key={id}>
@@ -6215,7 +6215,7 @@ export default function App() {
     );
     if (state === 'login' || state === 'locked') return <LoginScreen locked={state === 'locked'} onLoggedIn={() => setState('ok')} />;
     return (<>
-        <MintPipApp />
+        <MintPipApp /> 
         {getToken() && (
             <button onClick={() => { setToken(''); setState('login'); }} title="Log out"
                 style={{ position: 'fixed', left: 10, bottom: 10, zIndex: 40, padding: '5px 10px', borderRadius: 10, border: '1px solid #232C45', background: 'rgba(20,27,48,.85)', color: '#94A3B8', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>Log out</button>

@@ -988,10 +988,17 @@ const { Mt5ImportModal, PendingPanel, missingDetails, Mt5Details, parseMt5Report
         positions.forEach((p) => {
             const o = filledBy.get(p.position);
             p.entryType = o ? (/stop/.test(o.type) && !/limit/.test(o.type) ? 'Stop' : /limit|stop/.test(o.type) ? 'Limit' : 'Market') : '';
-            p.plannedSl = (o && o.sl) || p.sl; p.plannedTp = (o && o.tp) || p.tp;
             const out = deals.find((d) => d.direction === 'out' && d.symbol === p.symbol && d.time === p.closeTime && (d.price === null || p.exitPrice === null || Math.abs(d.price - p.exitPrice) < 1e-9)) || deals.find((d) => d.direction === 'out' && d.symbol === p.symbol && d.time === p.closeTime);
             p.exitReason = out ? (/\[sl/i.test(out.comment) ? 'SL' : /\[tp/i.test(out.comment) ? 'TP' : /so:|stop ?out/i.test(out.comment) ? 'Stop out' : 'Manual') : '';
             p.net = r2(p.profit + p.commission + p.swap);
+            // Real close price = price of the Deals row with Direction "out"
+            if (out && out.price) p.exitPrice = out.price;
+            // Trade hit TP -> TP price is the real close price, SL stays the Positions S/L.
+            // Trade hit SL -> SL price is the real close price, TP stays the Positions T/P.
+            const hitTp = p.exitReason === 'TP' || (p.exitReason !== 'SL' && p.net > 0);
+            const posSl = p.sl || (o && o.sl) || null, posTp = p.tp || (o && o.tp) || null;
+            p.plannedSl = hitTp ? posSl : (p.exitPrice || posSl);
+            p.plannedTp = hitTp ? (p.exitPrice || posTp) : posTp;
             p.durationMin = minutesBetween(p.openTime, p.closeTime);
             p.openDate = p.openTime.slice(0, 10);
         });
@@ -1036,6 +1043,7 @@ const { Mt5ImportModal, PendingPanel, missingDetails, Mt5Details, parseMt5Report
         if (!near(doc.entryPrice, f.entryPrice, 1e-7)) add('Entry', doc.entryPrice ?? '-', f.entryPrice);
         if (f.slPrice && !near(doc.slPrice, f.slPrice, 1e-7)) add('SL', doc.slPrice ?? '-', f.slPrice);
         if (f.tpPrice && !near(doc.tpPrice, f.tpPrice, 1e-7)) add('TP', doc.tpPrice ?? '-', f.tpPrice);
+        if (f.planeTarget && doc.planeTarget !== f.planeTarget) add('RR', doc.planeTarget || '-', f.planeTarget);
         if (!near(docNet(doc), p.net, 0.005)) add('Net P&L', docNet(doc).toFixed(2), p.net.toFixed(2));
         if (doc.mt5Position !== p.position || !doc.openTime || !doc.exitReason) add('MT5 execution data', 'none', 'times, exit, costs');
         return ch;
